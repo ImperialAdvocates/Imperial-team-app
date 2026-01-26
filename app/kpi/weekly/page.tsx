@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import {
@@ -42,9 +42,9 @@ function toISODateMelb(d: Date): string {
   return fmt.format(d);
 }
 
-/* ---------------- Page ---------------- */
+/* ---------------- Inner page (uses search params) ---------------- */
 
-export default function KpiWeeklyPage() {
+function KpiWeeklyInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -64,6 +64,7 @@ export default function KpiWeeklyPage() {
   useEffect(() => {
     async function load() {
       setLoading(true);
+      setMessage(null);
 
       const { data: sessionData } = await supabase.auth.getSession();
       const session = sessionData.session;
@@ -117,7 +118,7 @@ export default function KpiWeeklyPage() {
           (values ?? []).forEach((v: any) => {
             const key = v.field?.key;
             const num = Number(v.value_text);
-            if (!isNaN(num) && key && bySubmission[v.submission_id]) {
+            if (!Number.isNaN(num) && key && bySubmission[v.submission_id]) {
               bySubmission[v.submission_id].values[key] = num;
             }
           });
@@ -132,14 +133,14 @@ export default function KpiWeeklyPage() {
         // CLOSER → MEETINGS
         // =========================
         const { data: meetings, error: meetErr } = await supabase
-  .from("meetings")
-  .select("meeting_at, showed_up, moved_to_ss2, is_closed, attended_by_id, booked_by_id, booked_calendar_user_id")
-  .gte("meeting_at", `${weekStartISO}T00:00:00`)
-  .or(
-    `attended_by_id.eq.${session.user.id},
-     booked_by_id.eq.${session.user.id},
-     booked_calendar_user_id.eq.${session.user.id}`
-  );
+          .from("meetings")
+          .select(
+            "meeting_at, showed_up, moved_to_ss2, is_closed, attended_by_id, booked_by_id, booked_calendar_user_id"
+          )
+          .gte("meeting_at", `${weekStartISO}T00:00:00`)
+          .or(
+            `attended_by_id.eq.${session.user.id},booked_by_id.eq.${session.user.id},booked_calendar_user_id.eq.${session.user.id}`
+          );
 
         if (meetErr) throw new Error(meetErr.message);
 
@@ -160,8 +161,7 @@ export default function KpiWeeklyPage() {
             (byDate[date].values["meetings_attended"] ?? 0) + 1;
 
           if (m.showed_up) {
-            byDate[date].values["shows"] =
-              (byDate[date].values["shows"] ?? 0) + 1;
+            byDate[date].values["shows"] = (byDate[date].values["shows"] ?? 0) + 1;
           }
 
           if (m.moved_to_ss2) {
@@ -170,8 +170,7 @@ export default function KpiWeeklyPage() {
           }
 
           if (m.is_closed) {
-            byDate[date].values["closed"] =
-              (byDate[date].values["closed"] ?? 0) + 1;
+            byDate[date].values["closed"] = (byDate[date].values["closed"] ?? 0) + 1;
           }
         }
 
@@ -205,9 +204,7 @@ export default function KpiWeeklyPage() {
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="mx-auto max-w-4xl">
         <div className="flex items-center justify-between mb-6">
-          <h1 className="text-2xl font-semibold">
-            Weekly KPI ({roleView})
-          </h1>
+          <h1 className="text-2xl font-semibold">Weekly KPI ({roleView})</h1>
           <button
             onClick={() => router.push("/hub")}
             className="rounded-xl border px-4 py-2 text-sm bg-white"
@@ -266,10 +263,7 @@ export default function KpiWeeklyPage() {
               <h2 className="font-medium mb-3">Weekly Totals</h2>
               <ul className="grid grid-cols-2 gap-3 text-sm">
                 {Object.entries(weeklyTotals).map(([k, v]) => (
-                  <li
-                    key={k}
-                    className="rounded-lg border px-3 py-2 flex justify-between"
-                  >
+                  <li key={k} className="rounded-lg border px-3 py-2 flex justify-between">
                     <span className="capitalize">{k.replaceAll("_", " ")}</span>
                     <span className="font-medium">{v}</span>
                   </li>
@@ -286,5 +280,15 @@ export default function KpiWeeklyPage() {
         )}
       </div>
     </div>
+  );
+}
+
+/* ---------------- Wrapper (adds suspense boundary) ---------------- */
+
+export default function KpiWeeklyPage() {
+  return (
+    <Suspense fallback={<div className="p-6">Loading…</div>}>
+      <KpiWeeklyInner />
+    </Suspense>
   );
 }
