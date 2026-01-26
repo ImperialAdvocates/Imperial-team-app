@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import FocusTimer from "@/src/app/login/components/FocusTimer";
 
 type AlertCardTone = "red" | "amber" | "green" | "blue";
 
@@ -604,6 +605,11 @@ export default function HubPage() {
           </div>
         </div>
       </div>
+
+{/* Focus Timer */}
+<div className="mb-4">
+  <FocusTimer />
+</div>
 
       {/* TOP PANELS */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-3 mb-4">
