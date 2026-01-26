@@ -17,19 +17,19 @@ export default function DocumentsPage() {
   const docs: DocItem[] = useMemo(
     () => [
       {
-        title: "Co-Living Informative Video",
+        title: "Weekly KPIs",
         description: "Overview video explaining the co-living model and numbers.",
         url: "https://drive.google.com/file/d/1LqtiozlIMxnTbF8MgDAAqvUHPFo0x3Af/view",
         tag: "Video",
       },
       {
-        title: "Co-Living Information Booklet",
+        title: "Strategy session summary",
         description: "Detailed breakdown of co-living strategy, demand, and returns.",
         url: "https://docs.google.com/document/d/1LyCPs7_yiJsYf-Ntnst1s0cyUTKHXTlE/view",
         tag: "Booklet",
       },
       {
-        title: "NDIS Information Booklet",
+        title: "Internal sales sop",
         description: "NDIS overview, SDA explanation, and investment fundamentals.",
         url: "https://docs.google.com/document/d/1C_HIS4NpNDaEpjtrtHjcdKteRXoBZcJs/view",
         tag: "NDIS",
