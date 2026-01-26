@@ -30,13 +30,16 @@ export default function LoginPage() {
 
     try {
       if (mode === "signup") {
-        const { error } = await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            data: { full_name: fullName },
-          },
-        });
+       const { error } = await supabase.auth.signUp({
+  email,
+  password,
+  options: {
+    data: {
+      full_name: fullName,
+      role: "setter", // ✅ must be admin/setter/closer
+    },
+  },
+});
 
         if (error) throw error;
 
