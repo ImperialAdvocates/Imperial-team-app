@@ -5,25 +5,10 @@ import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import FocusTimer from "@/src/app/login/components/FocusTimer";
 
-type AlertCardTone = "red" | "amber" | "green" | "blue";
 type LeaderboardMode = "weekly" | "monthly";
-
 const LEADERBOARD_LIMIT = 10;
 
-/* ---------------- UI helpers ---------------- */
-
-function toneClasses(tone: AlertCardTone) {
-  switch (tone) {
-    case "red":
-      return "border-red-200 bg-red-50 text-red-900";
-    case "amber":
-      return "border-amber-200 bg-amber-50 text-amber-900";
-    case "green":
-      return "border-green-200 bg-green-50 text-green-900";
-    case "blue":
-      return "border-blue-200 bg-blue-50 text-blue-900";
-  }
-}
+/* ---------------- Utils ---------------- */
 
 function toISODateMelb(d: Date): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -124,33 +109,6 @@ function melbMidnightToUtcIso(dateISO: string) {
   return new Date(melbMidnightUtcMs).toISOString();
 }
 
-function AlertCard({
-  title,
-  description,
-  tone,
-  ctaLabel,
-  onClick,
-}: {
-  title: string;
-  description: string;
-  tone: AlertCardTone;
-  ctaLabel?: string;
-  onClick?: () => void;
-}) {
-  return (
-    <div className={`rounded-2xl border p-4 ${toneClasses(tone)}`}>
-      <div className="text-sm font-semibold leading-snug">{title}</div>
-      <div className="mt-2 text-xs leading-relaxed opacity-80 whitespace-pre-line">{description}</div>
-
-      {ctaLabel && onClick ? (
-        <button onClick={onClick} className="mt-4 w-full rounded-xl bg-black px-3 py-2 text-xs text-white">
-          {ctaLabel}
-        </button>
-      ) : null}
-    </div>
-  );
-}
-
 /* ---------------- Types ---------------- */
 
 type LeaderRow = {
@@ -173,8 +131,8 @@ type LeaderRow = {
 
 type WeeklyTargets = {
   booked: number | null;     // appointments_booked weekly target
-  show_rate: number | null;  // optional %
-  move_rate: number | null;  // optional %
+  show_rate: number | null;  // %
+  ss2_rate: number | null;   // %
 };
 
 const ROUTES = {
@@ -223,42 +181,42 @@ function QuickActionsDropdown({
           e.stopPropagation();
           setOpen((v) => !v);
         }}
-        className="rounded-xl border bg-white px-4 py-2 text-sm text-black"
+        className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-white hover:bg-white/10 transition"
       >
         Quick Actions ▾
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-2 w-80 rounded-2xl border bg-white shadow-sm overflow-hidden z-50">
-          <div className="px-3 py-2 text-xs font-semibold text-black/60">Core</div>
+        <div className="absolute right-0 mt-2 w-80 rounded-2xl border border-white/10 bg-black/70 backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.55)] overflow-hidden z-50">
+          <div className="px-3 py-2 text-xs font-semibold text-white/60">Core</div>
 
-          <button onClick={() => go(ROUTES.meetings)} className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50">
+          <button onClick={() => go(ROUTES.meetings)} className="w-full px-3 py-3 text-left text-sm text-white hover:bg-white/5">
             📅 Meetings
-            <div className="text-xs text-black/50 mt-1">View + update outcomes</div>
+            <div className="text-xs text-white/50 mt-1">View + update outcomes</div>
           </button>
 
-          <button onClick={() => go(ROUTES.dailyKpis)} className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50">
+          <button onClick={() => go(ROUTES.dailyKpis)} className="w-full px-3 py-3 text-left text-sm text-white hover:bg-white/5">
             📌 Daily KPI Entry
-            <div className="text-xs text-black/50 mt-1">Appointments booked</div>
+            <div className="text-xs text-white/50 mt-1">Appointments booked</div>
           </button>
 
-          <button onClick={() => go(ROUTES.docsAll)} className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50">
+          <button onClick={() => go(ROUTES.docsAll)} className="w-full px-3 py-3 text-left text-sm text-white hover:bg-white/5">
             📄 Documents
-            <div className="text-xs text-black/50 mt-1">Company docs + resources</div>
+            <div className="text-xs text-white/50 mt-1">Company docs + resources</div>
           </button>
 
-          <button onClick={() => go(ROUTES.profile)} className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50">
+          <button onClick={() => go(ROUTES.profile)} className="w-full px-3 py-3 text-left text-sm text-white hover:bg-white/5">
             👤 Profile
-            <div className="text-xs text-black/50 mt-1">Logout or delete account</div>
+            <div className="text-xs text-white/50 mt-1">Logout</div>
           </button>
 
           {isAdmin ? (
             <>
-              <div className="px-3 py-2 text-xs font-semibold text-black/60">Admin</div>
-              <button onClick={() => go("/admin")} className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50">
+              <div className="px-3 py-2 text-xs font-semibold text-white/60">Admin</div>
+              <button onClick={() => go("/admin")} className="w-full px-3 py-3 text-left text-sm text-white hover:bg-white/5">
                 🛠 Admin Hub
               </button>
-              <button onClick={() => go("/admin/kpi-templates")} className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50">
+              <button onClick={() => go("/admin/kpi-templates")} className="w-full px-3 py-3 text-left text-sm text-white hover:bg-white/5">
                 🎯 KPI Setup
               </button>
             </>
@@ -285,7 +243,7 @@ export default function HubPage() {
   const [teamLeaders, setTeamLeaders] = useState<LeaderRow[]>([]);
   const [leaderboardMode, setLeaderboardMode] = useState<LeaderboardMode>("weekly");
 
-  // ✅ weekly target banner data
+  // weekly targets banner data
   const [weeklyTargets, setWeeklyTargets] = useState<WeeklyTargets | null>(null);
 
   const todayISO = useMemo(() => toISODateMelb(new Date()), []);
@@ -300,6 +258,15 @@ export default function HubPage() {
   const rangeStartUtcIso = useMemo(() => melbMidnightToUtcIso(rangeStartISO), [rangeStartISO]);
   const rangeEndUtcIso = useMemo(() => melbMidnightToUtcIso(rangeEndExclusiveISO), [rangeEndExclusiveISO]);
 
+  const weeklyTargetsText = useMemo(() => {
+    if (!weeklyTargets) return "Weekly targets not set";
+    const parts: string[] = [];
+    if (weeklyTargets.booked !== null) parts.push(`Booked ${weeklyTargets.booked}`);
+    if (weeklyTargets.show_rate !== null) parts.push(`Show ${weeklyTargets.show_rate}%`);
+    if (weeklyTargets.ss2_rate !== null) parts.push(`SS2 ${weeklyTargets.ss2_rate}%`);
+    return parts.length ? parts.join(" • ") : "Weekly targets not set";
+  }, [weeklyTargets]);
+
   const loadWeeklyTargetsSafe = useCallback(async () => {
     const res = await supabase
       .from("kpi_targets")
@@ -308,12 +275,11 @@ export default function HubPage() {
       .eq("role", "setter");
 
     if (res.error) {
-      // If table doesn't exist (or RLS), just show "Not set"
       setWeeklyTargets(null);
       return;
     }
 
-    const next: WeeklyTargets = { booked: null, show_rate: null, move_rate: null };
+    const next: WeeklyTargets = { booked: null, show_rate: null, ss2_rate: null };
     const rows = (res.data ?? []) as any[];
 
     for (const r of rows) {
@@ -323,7 +289,7 @@ export default function HubPage() {
 
       if (key === "appointments_booked") next.booked = val;
       if (key === "show_rate") next.show_rate = val;
-      if (key === "ss2_rate") next.move_rate = val;
+      if (key === "ss2_rate") next.ss2_rate = val;
     }
 
     setWeeklyTargets(next);
@@ -357,7 +323,7 @@ export default function HubPage() {
       const adminFlag = !!(myProfileRes.data as any)?.is_admin || r === "admin";
       setIsAdmin(adminFlag);
 
-      // ✅ load weekly targets (safe fallback)
+      // weekly targets
       await loadWeeklyTargetsSafe();
 
       // Today KPI submitted?
@@ -401,7 +367,7 @@ export default function HubPage() {
         });
       }
 
-      // 2) Meetings metrics (simplified schema)
+      // 2) Meetings metrics
       const mtgRes = await supabase
         .from("meetings")
         .select("meeting_at, booked_by_id, attended_by_id, showed_up, moved_to_ss2, discarded_at")
@@ -431,13 +397,13 @@ export default function HubPage() {
 
         const showed = m.showed_up === true;
 
-        // BOOKER-owned show rate (independent of taker)
+        // BOOKER-owned show rate
         if (b) {
           bookedOccurredBy[b] = (bookedOccurredBy[b] ?? 0) + 1;
           if (showed) bookedShowedBy[b] = (bookedShowedBy[b] ?? 0) + 1;
         }
 
-        // TAKER-owned move rate (person-specific)
+        // TAKER-owned move rate
         if (a) {
           takenTotal[a] = (takenTotal[a] ?? 0) + 1;
 
@@ -482,7 +448,6 @@ export default function HubPage() {
         };
       });
 
-      // Sort: booked_occurred desc, then show rate desc, then move rate desc, then taken_showed desc
       leaders.sort((a, b) => {
         if (b.booked_occurred !== a.booked_occurred) return b.booked_occurred - a.booked_occurred;
 
@@ -518,194 +483,229 @@ export default function HubPage() {
     load();
   }, [load]);
 
-  const kpiTone: AlertCardTone = todaySubmitted ? "green" : "amber";
+  const kpiTone = todaySubmitted ? "green" : "amber";
 
-  if (loading) return <div className="py-4 text-black">Loading…</div>;
+  /* ---------------- UI helpers (dark neon) ---------------- */
 
-  const weeklyTargetsText =
-  !weeklyTargets
-    ? "Weekly targets: Not set"
-    : (() => {
-        const parts: string[] = [];
+  function toneChip(tone: "green" | "amber" | "blue") {
+    if (tone === "green") return "border-emerald-400/20 bg-emerald-400/10 text-emerald-200";
+    if (tone === "amber") return "border-amber-400/20 bg-amber-400/10 text-amber-200";
+    return "border-sky-400/20 bg-sky-400/10 text-sky-200";
+  }
 
-        if (weeklyTargets.booked !== null) {
-          parts.push(`Booked ${weeklyTargets.booked}`);
-        }
-
-        if (weeklyTargets.show_rate !== null) {
-          parts.push(`Show rate ${weeklyTargets.show_rate}%`);
-        }
-
-        if (weeklyTargets.move_rate !== null) {
-          parts.push(`SS2 ${weeklyTargets.move_rate}%`);
-        }
-
-        return parts.length
-          ? `Weekly targets: ${parts.join(" • ")}`
-          : "Weekly targets: Not set";
-      })();
+  if (loading) {
+    return (
+      <div className="min-h-[100dvh] bg-[#050807] text-white p-6">
+        <div className="mx-auto max-w-4xl">Loading…</div>
+      </div>
+    );
+  }
 
   return (
-    <div className="text-black">
-      {/* Header */}
-      <div className="flex items-start justify-between gap-3 mb-5">
-        <div>
-          <h1 className="text-2xl font-semibold">Hub</h1>
-          <div className="mt-1 text-xs text-black/70">Leaderboard • KPIs • Meetings</div>
-          <div className="mt-1 text-[11px] text-black/50">
-            Logged in as: <span className="font-medium">{myRole || "user"}</span>
-          </div>
-        </div>
+    <div className="min-h-[100dvh] bg-[#050807] text-white relative overflow-hidden">
+      {/* background glows */}
+      <div className="pointer-events-none absolute -top-24 left-1/2 h-[420px] w-[520px] -translate-x-1/2 rounded-full bg-emerald-400/25 blur-[120px]" />
+      <div className="pointer-events-none absolute top-[35%] left-[-140px] h-[320px] w-[320px] rounded-full bg-emerald-500/20 blur-[120px]" />
+      <div className="pointer-events-none absolute bottom-[-140px] right-[-140px] h-[380px] w-[380px] rounded-full bg-emerald-400/15 blur-[120px]" />
 
-        <div className="flex flex-col items-end gap-2">
-          <div className="flex gap-2 flex-wrap justify-end items-center">
-            <QuickActionsDropdown router={router} isAdmin={isAdmin} />
-            <button onClick={load} className="rounded-xl border px-4 py-2 text-sm bg-white">
-              Refresh
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div className="mb-4">
-        <FocusTimer />
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
-        <AlertCard
-          tone={kpiTone}
-          title="📌 Today’s KPI"
-          description={todaySubmitted ? `Submitted for today (${todayISO}).` : `Not submitted yet for today (${todayISO}).`}
-          ctaLabel={todaySubmitted ? "Edit" : "Submit"}
-          onClick={() => router.push(ROUTES.dailyKpis)}
-        />
-
-        <AlertCard
-          tone="blue"
-          title="📅 Meetings"
-          description="Update outcomes (showed up / moved to SS2) and who booked/took the meeting."
-          ctaLabel="Open"
-          onClick={() => router.push(ROUTES.meetings)}
-        />
-      </div>
-
-      {/* LEADERBOARD */}
-      <div className="rounded-2xl border bg-white p-4 mb-6">
-        <div className="flex items-start justify-between gap-3 flex-wrap">
+      <div className="mx-auto w-full max-w-5xl p-4">
+        {/* Header */}
+        <div className="flex items-start justify-between gap-3 mb-5">
           <div>
-            <div className="text-sm font-semibold">🏆 Team leaderboard ({leaderboardMode})</div>
-            <div className="mt-1 text-xs text-black/60">
-              Period: {fmtRangeShort(rangeStartISO, rangeEndExclusiveISO)}
-            </div>
-
-            <div className="mt-2 text-[11px] text-black/50 whitespace-pre-line">
-              {"Show rate (Booked-by) = booked_showed / booked_occurred (regardless of who took it)"}
-              {"\n"}
-              {"Move rate (Taken-by) = taken_moved / taken_showed"}
+            <h1 className="text-2xl font-semibold tracking-tight">Hub</h1>
+            <div className="mt-1 text-xs text-white/60">Leaderboard • KPIs • Meetings</div>
+            <div className="mt-1 text-[11px] text-white/45">
+              Logged in as: <span className="font-medium text-white/80">{myRole || "user"}</span>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
+            <QuickActionsDropdown router={router} isAdmin={isAdmin} />
             <button
-              onClick={() => setLeaderboardMode("weekly")}
-              className={`rounded-xl border px-3 py-2 text-xs ${
-                leaderboardMode === "weekly" ? "bg-black text-white" : "bg-white text-black"
-              }`}
-              type="button"
+              onClick={load}
+              className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-white hover:bg-white/10 transition"
             >
-              Weekly
-            </button>
-            <button
-              onClick={() => setLeaderboardMode("monthly")}
-              className={`rounded-xl border px-3 py-2 text-xs ${
-                leaderboardMode === "monthly" ? "bg-black text-white" : "bg-white text-black"
-              }`}
-              type="button"
-            >
-              Monthly
+              Refresh
             </button>
           </div>
         </div>
 
-        {/* ✅ Weekly targets line */}
-        <div className="mt-3 rounded-xl border bg-gray-50 px-3 py-2 text-xs text-black/70 flex items-center justify-between gap-3 flex-wrap">
-          <div>
-            <span className="font-semibold text-black">{weeklyTargetsText}</span>
-          </div>
-
-          {isAdmin ? (
-            <button
-              onClick={() => router.push("/admin/kpi-templates")}
-              className="rounded-lg border bg-white px-2 py-1 text-[11px] text-black"
-              type="button"
-            >
-              Set targets
-            </button>
-          ) : null}
+        {/* Focus Timer */}
+        <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.45)] p-4 mb-4">
+          <FocusTimer />
         </div>
 
-        {teamLeaders.length === 0 ? (
-          <div className="mt-3 text-sm text-black/60">No leaderboard data yet.</div>
-        ) : (
-          <div className="mt-3 overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-black/60">
-                  <th className="py-2">#</th>
-                  <th className="py-2">Name</th>
-                  <th className="py-2">Booked</th>
-                  <th className="py-2">Shows</th>
-                  <th className="py-2">Show rate</th>
-                  <th className="py-2">Taken</th>
-                  <th className="py-2">Moved</th>
-                  <th className="py-2">Move rate</th>
-                </tr>
-              </thead>
+        {/* Top cards */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+          {/* KPI card */}
+          <div className="relative rounded-2xl border border-emerald-400/20 bg-white/5 backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.45)] p-4 overflow-hidden">
+            <div className="pointer-events-none absolute -top-20 -right-20 h-56 w-56 rounded-full bg-emerald-400/20 blur-[80px]" />
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold">📌 Today’s KPI</div>
+                <div className="mt-2 text-xs text-white/60 whitespace-pre-line">
+                  {todaySubmitted
+                    ? `Submitted for today (${todayISO}).`
+                    : `Not submitted yet for today (${todayISO}).`}
+                </div>
+              </div>
+              <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs ${toneChip(kpiTone)}`}>
+                {todaySubmitted ? "Submitted" : "Pending"}
+              </span>
+            </div>
 
-              <tbody>
-                {teamLeaders.slice(0, LEADERBOARD_LIMIT).map((r, idx) => (
-                  <tr key={r.user_id} className="border-t">
-                    <td className="py-2">{idx + 1}</td>
-                    <td className="py-2 font-medium">{r.name}</td>
+            <button
+              onClick={() => router.push(ROUTES.dailyKpis)}
+              className="mt-4 w-full rounded-xl bg-white text-black px-3 py-2 text-sm font-medium hover:opacity-95 active:opacity-90"
+            >
+              {todaySubmitted ? "Edit" : "Submit"}
+            </button>
+          </div>
 
-                    <td className="py-2">{safeNum(r.booked_kpi)}</td>
+          {/* Meetings card */}
+          <div className="relative rounded-2xl border border-sky-400/15 bg-white/5 backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.45)] p-4 overflow-hidden">
+            <div className="pointer-events-none absolute -bottom-24 -left-24 h-64 w-64 rounded-full bg-emerald-400/15 blur-[90px]" />
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold">📅 Meetings</div>
+                <div className="mt-2 text-xs text-white/60 whitespace-pre-line">
+                </div>
+              </div>
+              <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs ${toneChip("blue")}`}>
+                Live
+              </span>
+            </div>
 
-                    <td className="py-2">{safeNum(r.booked_showed)}</td>
+            <button
+              onClick={() => router.push(ROUTES.meetings)}
+              className="mt-4 w-full rounded-xl bg-white text-black px-3 py-2 text-sm font-medium hover:opacity-95 active:opacity-90"
+            >
+              Open
+            </button>
+          </div>
+        </div>
 
-                    <td className="py-2">
-                      {r.show_rate_text}{" "}
-                      <span className="text-[11px] text-black/40">
-                        ({safeNum(r.booked_showed)}/{safeNum(r.booked_occurred)})
-                      </span>
-                    </td>
+        {/* LEADERBOARD */}
+        <div className="rounded-2xl border border-white/10 bg-black/40 backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.55)] p-4 mb-6">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <div className="text-sm font-semibold">🏆 Team leaderboard ({leaderboardMode})</div>
+              <div className="mt-1 text-xs text-white/55">
+                Period: {fmtRangeShort(rangeStartISO, rangeEndExclusiveISO)}
+              </div>
 
-                    <td className="py-2">{safeNum(r.taken_showed)}</td>
+              <div className="mt-2 text-[11px] text-white/45 whitespace-pre-line">
+              </div>
+            </div>
 
-                    <td className="py-2">{safeNum(r.taken_moved)}</td>
-
-                    <td className="py-2">
-                      {r.move_rate_text}{" "}
-                      <span className="text-[11px] text-black/40">
-                        ({safeNum(r.taken_moved)}/{safeNum(r.taken_showed)})
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-
-            <div className="mt-2 text-[11px] text-black/50">
-              Sorted by booked occurred → show rate → move rate → taken.
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setLeaderboardMode("weekly")}
+                className={`rounded-xl border px-3 py-2 text-xs transition ${
+                  leaderboardMode === "weekly"
+                    ? "border-emerald-400/30 bg-emerald-400/15 text-emerald-100"
+                    : "border-white/10 bg-white/5 text-white hover:bg-white/10"
+                }`}
+                type="button"
+              >
+                Weekly
+              </button>
+              <button
+                onClick={() => setLeaderboardMode("monthly")}
+                className={`rounded-xl border px-3 py-2 text-xs transition ${
+                  leaderboardMode === "monthly"
+                    ? "border-emerald-400/30 bg-emerald-400/15 text-emerald-100"
+                    : "border-white/10 bg-white/5 text-white hover:bg-white/10"
+                }`}
+                type="button"
+              >
+                Monthly
+              </button>
             </div>
           </div>
-        )}
-      </div>
 
-      {msg && (
-        <div className="mt-6 rounded-xl border bg-gray-50 p-3 text-sm">
-          {msg}
+          {/* Weekly targets banner */}
+          <div className="mt-3 rounded-xl border border-emerald-400/15 bg-emerald-400/5 px-3 py-2 text-xs text-white/80 flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="inline-flex items-center rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1 text-xs text-emerald-100">
+                Weekly targets
+              </span>
+              <span className="text-white/75">{weeklyTargetsText}</span>
+            </div>
+
+            {isAdmin ? (
+              <button
+                onClick={() => router.push("/admin/kpi-templates")}
+                className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-white hover:bg-white/10 transition"
+                type="button"
+              >
+                Set targets
+              </button>
+            ) : null}
+          </div>
+
+          {teamLeaders.length === 0 ? (
+            <div className="mt-4 text-sm text-white/60">No leaderboard data yet.</div>
+          ) : (
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-white/55">
+                    <th className="py-2">#</th>
+                    <th className="py-2">Name</th>
+                    <th className="py-2">Booked</th>
+                    <th className="py-2">Shows</th>
+                    <th className="py-2">Show rate</th>
+                    <th className="py-2">Taken</th>
+                    <th className="py-2">Moved</th>
+                    <th className="py-2">Move rate</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {teamLeaders.slice(0, LEADERBOARD_LIMIT).map((r, idx) => (
+                    <tr key={r.user_id} className="border-t border-white/10 hover:bg-white/5 transition">
+                      <td className="py-2 text-white/70">{idx + 1}</td>
+                      <td className="py-2 font-medium">{r.name}</td>
+
+                      <td className="py-2">{safeNum(r.booked_kpi)}</td>
+                      <td className="py-2">{safeNum(r.booked_showed)}</td>
+
+                      <td className="py-2">
+                        <span className="text-emerald-100">{r.show_rate_text}</span>{" "}
+                        <span className="text-[11px] text-white/40">
+                          ({safeNum(r.booked_showed)}/{safeNum(r.booked_occurred)})
+                        </span>
+                      </td>
+
+                      <td className="py-2">{safeNum(r.taken_showed)}</td>
+
+                      <td className="py-2">{safeNum(r.taken_moved)}</td>
+
+                      <td className="py-2">
+                        <span className="text-emerald-100">{r.move_rate_text}</span>{" "}
+                        <span className="text-[11px] text-white/40">
+                          ({safeNum(r.taken_moved)}/{safeNum(r.taken_showed)})
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              <div className="mt-2 text-[11px] text-white/45">
+              
+              </div>
+            </div>
+          )}
         </div>
-      )}
+
+        {msg ? (
+          <div className="mt-6 rounded-xl border border-white/10 bg-white/5 p-3 text-sm text-white/80">
+            {msg}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }

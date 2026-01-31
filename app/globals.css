@@ -1,26 +1,54 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: 248 250 252;        /* slate-50 */
+  --card: 255 255 255;      /* white */
+  --border: 226 232 240;    /* slate-200 */
+  --text: 15 23 42;         /* slate-900 */
+  --muted: 100 116 139;     /* slate-500 */
+
+  --brand: 28 53 255;       /* tweak: your brand blue */
+  --brand2: 245 76 80;      /* tweak: your red */
+  --ring: 59 130 246;       /* blue-500 */
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+html, body {
+  background: rgb(var(--bg));
+  color: rgb(var(--text));
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* nicer default borders/shadows */
+.ia-card {
+  background: rgb(var(--card));
+  border: 1px solid rgb(var(--border));
+  border-radius: 20px;
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+.ia-shadow {
+  box-shadow:
+    0 1px 0 rgba(15, 23, 42, 0.03),
+    0 8px 24px rgba(15, 23, 42, 0.06);
+}
+/* Optional: smoother text + better table look on dark */
+html, body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.ia-table th {
+  color: rgba(255,255,255,0.55);
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.ia-table td {
+  color: rgba(255,255,255,0.9);
+}
+
+.ia-row {
+  border-top: 1px solid rgba(255,255,255,0.10);
+}
+
+.ia-row:hover {
+  background: rgba(255,255,255,0.05);
 }

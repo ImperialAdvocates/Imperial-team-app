@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import { AppShell, GlassCard, NeonButton, NeonBadge } from "@/app/Components/ui/app-ui";
 
 type Tone = "red" | "amber" | "green" | "blue";
 type RangeMode = "weekly" | "monthly";
@@ -388,197 +389,177 @@ export default function AdminHubPage() {
   if (loading) return <div className="p-6 text-black">Loading…</div>;
 
   return (
-    <div className="min-h-[100dvh] bg-gray-50 p-4 text-black">
-      <div className="mx-auto w-full max-w-md">
-        {/* Header */}
-        <div className="flex items-start justify-between gap-3 mb-4">
-          <div>
-            <div className="text-xs text-black/60">Admin</div>
-            <h1 className="text-2xl font-semibold">Admin Overview</h1>
-            <div className="mt-1 text-xs text-black/60">
-              Scope: <b>{scopeLabel}</b> • Period ({rangeMode}): {rangeLabel} • Today: {todayISO}
-            </div>
-            <div className="mt-1 text-[11px] text-black/50">
-              Logged in as: <span className="font-medium">{myRole || "admin"}</span>
-              {isAdmin ? " (admin)" : ""}
-            </div>
-            <div className="mt-1 text-[11px] text-black/50">
-              Period totals include discarded meetings. Today totals hide discarded.
-              {scopeMode === "person" ? " Person scope attributes outcomes by attended_by_id." : ""}
-            </div>
-          </div>
-
-          <div className="flex gap-2">
-            <button onClick={() => router.push("/hub")} className="rounded-xl border bg-white px-3 py-2 text-xs">
-              Hub
-            </button>
-            <button onClick={load} className="rounded-xl border bg-white px-3 py-2 text-xs">
-              Refresh
-            </button>
-          </div>
-        </div>
-
-        {/* RANGE TOGGLE */}
-        <div className="mb-3 rounded-2xl border bg-white p-2 flex gap-2">
-          <button
-            type="button"
-            onClick={() => setRangeMode("weekly")}
-            className={`flex-1 rounded-xl px-3 py-2 text-sm border ${
-              rangeMode === "weekly" ? "bg-black text-white" : "bg-white text-black"
-            }`}
-          >
-            Weekly
-          </button>
-          <button
-            type="button"
-            onClick={() => setRangeMode("monthly")}
-            className={`flex-1 rounded-xl px-3 py-2 text-sm border ${
-              rangeMode === "monthly" ? "bg-black text-white" : "bg-white text-black"
-            }`}
-          >
-            Monthly
-          </button>
-        </div>
-
-        {/* SCOPE TOGGLE */}
-        <div className="mb-3 rounded-2xl border bg-white p-2">
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => setScopeMode("team")}
-              className={`flex-1 rounded-xl px-3 py-2 text-sm border ${
-                scopeMode === "team" ? "bg-black text-white" : "bg-white text-black"
-              }`}
-            >
-              Team
-            </button>
-            <button
-              type="button"
-              onClick={() => setScopeMode("person")}
-              className={`flex-1 rounded-xl px-3 py-2 text-sm border ${
-                scopeMode === "person" ? "bg-black text-white" : "bg-white text-black"
-              }`}
-            >
-              Person
-            </button>
-          </div>
-
-          {scopeMode === "person" ? (
-            <div className="mt-2">
-              <select
-                className="w-full rounded-xl border px-3 py-2 text-sm bg-white"
-                value={effectivePersonId}
-                onChange={(e) => setPersonId(e.target.value)}
-              >
-                {people.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.full_name ?? p.id}
-                  </option>
-                ))}
-              </select>
-              <div className="mt-1 text-[11px] text-black/50">
-                Person scope uses <b>meetings.attended_by_id</b> for shows/moved.
-              </div>
-            </div>
-          ) : null}
-        </div>
-
-        {/* CARDS */}
-        <div className="grid grid-cols-2 gap-3 mb-3">
-          <StatCard
-            title="Today KPI"
-            value={todaySubmitted ? "✅" : "—"}
-            subtitle={todaySubmitted ? "Submitted" : "Not submitted"}
-            tone={kpiTone}
-            onClick={() => router.push("/daily-kpis")}
-          />
-
-          <StatCard
-            title="Meetings today"
-            value={n(todayMeetings)}
-            subtitle={`Shows today: ${n(todayShows)}`}
-            tone="blue"
-            onClick={() => router.push("/meetings")}
-          />
-        </div>
-
-        <div className="grid grid-cols-2 gap-3 mb-3">
-          <StatCard
-            title="Booked"
-            value={n(bookedKpi)}
-            subtitle={`Period: ${rangeLabel}`}
-            tone="green"
-            onClick={() => router.push("/daily-kpis")}
-          />
-
-          <StatCard
-            title="Meetings on calendar"
-            value={n(meetingsOccurred)}
-            subtitle={`Show rate: ${showRate}`}
-            tone="blue"
-            onClick={() => router.push("/meetings")}
-          />
-        </div>
-
-        <div className="grid grid-cols-2 gap-3 mb-4">
-          <StatCard
-            title="Shows"
-            value={n(shows)}
-            subtitle={`Moved: ${n(moved)} • Move rate: ${moveRate}`}
-            tone="green"
-            onClick={() => router.push("/meetings")}
-          />
-
-          <StatCard
-            title="Moved to SS2"
-            value={n(moved)}
-            subtitle={`From shows: ${n(shows)} • ${moveRate}`}
-            tone={shows > 0 && moved === 0 ? "amber" : "green"}
-            onClick={() => router.push("/meetings")}
-          />
-        </div>
-
-        {/* ADMIN TOOLS */}
-        <div className="rounded-2xl border bg-white p-4">
-          <div className="text-sm font-semibold">Admin tools</div>
-
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <button
-              onClick={() => router.push("/meetings")}
-              className="rounded-xl border bg-white px-3 py-3 text-left"
-            >
-              <div className="text-sm font-semibold">Meetings</div>
-              <div className="text-xs text-black/60 mt-1">Outcomes + edits</div>
-            </button>
-
-            <button
-              onClick={() => router.push("/daily-kpis")}
-              className="rounded-xl border bg-white px-3 py-3 text-left"
-            >
-              <div className="text-sm font-semibold">Daily KPIs</div>
-              <div className="text-xs text-black/60 mt-1">Appointments booked</div>
-            </button>
-
-            <button
-              onClick={() => router.push("/admin/kpi-templates")}
-              className="rounded-xl border bg-white px-3 py-3 text-left"
-            >
-              <div className="text-sm font-semibold">KPI Setup</div>
-              <div className="text-xs text-black/60 mt-1">Weekly targets</div>
-            </button>
-
-            <button
-              onClick={() => router.push("/admin/performance")}
-              className="rounded-xl border bg-white px-3 py-3 text-left"
-            >
-              <div className="text-sm font-semibold">Performance</div>
-              <div className="text-xs text-black/60 mt-1">Per-person breakdown</div>
-            </button>
-          </div>
-        </div>
-
-        {msg && <div className="mt-4 rounded-xl border bg-gray-50 p-3 text-sm text-black">{msg}</div>}
-      </div>
+    return (
+  <AppShell
+    title="Admin Overview"
+    subtitle={`Scope: ${scopeLabel} • Period (${rangeMode}): ${rangeLabel} • Today: ${todayISO}`}
+    maxWidth="max-w-md"
+    right={
+      <>
+        <NeonButton variant="secondary" onClick={() => router.push("/hub")}>
+          Hub
+        </NeonButton>
+        <NeonButton variant="secondary" onClick={load}>
+          Refresh
+        </NeonButton>
+      </>
+    }
+  >
+    {/* meta line */}
+    <div className="mb-4 text-[11px] text-white/55">
+      Logged in as: <span className="text-white/80 font-medium">{myRole || "admin"}</span>
+      {isAdmin ? " (admin)" : ""} • Period totals include discarded meetings. Today totals hide discarded.
+      {scopeMode === "person" ? " Person scope attributes outcomes by attended_by_id." : ""}
     </div>
-  );
-}
+
+    {/* RANGE TOGGLE */}
+    <GlassCard className="mb-3" glow>
+      <div className="flex gap-2">
+        <NeonButton
+          variant={rangeMode === "weekly" ? "primary" : "secondary"}
+          className="flex-1"
+          onClick={() => setRangeMode("weekly")}
+          type="button"
+        >
+          Weekly
+        </NeonButton>
+        <NeonButton
+          variant={rangeMode === "monthly" ? "primary" : "secondary"}
+          className="flex-1"
+          onClick={() => setRangeMode("monthly")}
+          type="button"
+        >
+          Monthly
+        </NeonButton>
+      </div>
+    </GlassCard>
+
+    {/* SCOPE TOGGLE */}
+    <GlassCard className="mb-3" glow>
+      <div className="flex gap-2">
+        <NeonButton
+          variant={scopeMode === "team" ? "primary" : "secondary"}
+          className="flex-1"
+          onClick={() => setScopeMode("team")}
+          type="button"
+        >
+          Team
+        </NeonButton>
+        <NeonButton
+          variant={scopeMode === "person" ? "primary" : "secondary"}
+          className="flex-1"
+          onClick={() => setScopeMode("person")}
+          type="button"
+        >
+          Person
+        </NeonButton>
+      </div>
+
+      {scopeMode === "person" ? (
+        <div className="mt-3">
+          <select
+            className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white outline-none"
+            value={effectivePersonId}
+            onChange={(e) => setPersonId(e.target.value)}
+          >
+            {people.map((p) => (
+              <option key={p.id} value={p.id} className="text-black">
+                {p.full_name ?? p.id}
+              </option>
+            ))}
+          </select>
+          <div className="mt-2 text-[11px] text-white/55">
+            Person scope uses <b>meetings.attended_by_id</b> for shows/moved.
+          </div>
+        </div>
+      ) : null}
+    </GlassCard>
+
+    {/* CARDS */}
+    <div className="grid grid-cols-2 gap-3 mb-3">
+      <GlassCard glow>
+        <div className="flex items-center justify-between">
+          <div className="text-xs text-white/60 font-semibold">Today KPI</div>
+          <NeonBadge tone={todaySubmitted ? "green" : "amber"}>
+            {todaySubmitted ? "Submitted" : "Not submitted"}
+          </NeonBadge>
+        </div>
+        <div className="mt-2 text-3xl font-semibold">{todaySubmitted ? "✅" : "—"}</div>
+        <div className="mt-3">
+          <NeonButton variant="secondary" onClick={() => router.push("/daily-kpis")} className="w-full">
+            Open Daily KPIs
+          </NeonButton>
+        </div>
+      </GlassCard>
+
+      <GlassCard glow>
+        <div className="text-xs text-white/60 font-semibold">Meetings today</div>
+        <div className="mt-2 text-3xl font-semibold">{n(todayMeetings)}</div>
+        <div className="mt-1 text-xs text-white/55">Shows today: {n(todayShows)}</div>
+        <div className="mt-3">
+          <NeonButton variant="secondary" onClick={() => router.push("/meetings")} className="w-full">
+            Open Meetings
+          </NeonButton>
+        </div>
+      </GlassCard>
+    </div>
+
+    <div className="grid grid-cols-2 gap-3 mb-3">
+      <GlassCard>
+        <div className="text-xs text-white/60 font-semibold">Booked (KPI)</div>
+        <div className="mt-2 text-3xl font-semibold">{n(bookedKpi)}</div>
+        <div className="mt-1 text-xs text-white/55">Period: {rangeLabel}</div>
+      </GlassCard>
+
+      <GlassCard>
+        <div className="text-xs text-white/60 font-semibold">Meetings occurred</div>
+        <div className="mt-2 text-3xl font-semibold">{n(meetingsOccurred)}</div>
+        <div className="mt-1 text-xs text-white/55">Show rate: {showRate}</div>
+      </GlassCard>
+    </div>
+
+    <div className="grid grid-cols-2 gap-3 mb-4">
+      <GlassCard>
+        <div className="text-xs text-white/60 font-semibold">Shows</div>
+        <div className="mt-2 text-3xl font-semibold">{n(shows)}</div>
+        <div className="mt-1 text-xs text-white/55">
+          Moved: {n(moved)} • Move rate: {moveRate}
+        </div>
+      </GlassCard>
+
+      <GlassCard>
+        <div className="text-xs text-white/60 font-semibold">Moved to SS2</div>
+        <div className="mt-2 text-3xl font-semibold">{n(moved)}</div>
+        <div className="mt-1 text-xs text-white/55">
+          From shows: {n(shows)} • {moveRate}
+        </div>
+      </GlassCard>
+    </div>
+
+    {/* ADMIN TOOLS */}
+    <GlassCard glow>
+      <div className="text-sm font-semibold text-white">Admin tools</div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <NeonButton variant="secondary" onClick={() => router.push("/meetings")} className="w-full">
+          Meetings
+        </NeonButton>
+        <NeonButton variant="secondary" onClick={() => router.push("/daily-kpis")} className="w-full">
+          Daily KPIs
+        </NeonButton>
+        <NeonButton variant="secondary" onClick={() => router.push("/admin/kpi-templates")} className="w-full">
+          KPI Setup
+        </NeonButton>
+        <NeonButton variant="secondary" onClick={() => router.push("/admin/performance")} className="w-full">
+          Performance
+        </NeonButton>
+      </div>
+    </GlassCard>
+
+    {msg ? (
+      <GlassCard className="mt-4">
+        <div className="text-sm text-white/80">{msg}</div>
+      </GlassCard>
+    ) : null}
+  </AppShell>
+);
