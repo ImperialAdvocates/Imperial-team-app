@@ -13,12 +13,11 @@ type UserRow = {
 
 type MeetingRow = {
   id: string;
-  meeting_at: string;
-  booked_by_id: string | null;
-  attended_by_id: string | null;
-  showed_up: boolean | null;
-  moved_to_ss2: boolean | null;
-  is_closed: boolean | null;
+  meeting_at: string; // timestamptz
+  booked_by_id: string;
+  attended_by_id: string;
+  showed_up: boolean;
+  moved_to_ss2: boolean;
   discarded_at: string | null;
 };
 
@@ -38,6 +37,7 @@ function startOfWeekISO_Melb(today: Date) {
   const day = local.getDay(); // 0 Sun .. 6 Sat
   const diffToMon = (day + 6) % 7;
   local.setDate(local.getDate() - diffToMon);
+  local.setHours(0, 0, 0, 0);
   return melbISO(local);
 }
 
@@ -49,6 +49,34 @@ function addDaysISO(iso: string, days: number) {
 
 function normRole(r?: string | null) {
   return (r ?? "").trim().toLowerCase();
+}
+
+/**
+ * Convert a Melbourne “YYYY-MM-DD” midnight into a UTC ISO string using the
+ * correct Melbourne offset for that date (handles DST).
+ */
+function melbMidnightToUtcIso(dateISO: string) {
+  const baseUtc = new Date(`${dateISO}T00:00:00Z`);
+
+  const parts = new Intl.DateTimeFormat("en-AU", {
+    timeZone: "Australia/Melbourne",
+    timeZoneName: "shortOffset",
+    year: "numeric",
+  }).formatToParts(baseUtc);
+
+  const tz = parts.find((p) => p.type === "timeZoneName")?.value ?? "GMT+11";
+  const m = tz.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/);
+
+  let offsetMin = 11 * 60;
+  if (m) {
+    const sign = m[1] === "-" ? -1 : 1;
+    const hh = Number(m[2] ?? "0");
+    const mm = Number(m[3] ?? "0");
+    offsetMin = sign * (hh * 60 + mm);
+  }
+
+  const melbMidnightUtcMs = Date.parse(`${dateISO}T00:00:00Z`) - offsetMin * 60_000;
+  return new Date(melbMidnightUtcMs).toISOString();
 }
 
 /* ---------------- Formatting helpers ---------------- */
@@ -102,20 +130,18 @@ export default function AdminPerformancePage() {
     return u?.full_name ?? "Team member";
   }, [users, selectedUserId]);
 
-  // KPI (manual)
+  // KPI (from daily_kpis)
   const [bookedKpi, setBookedKpi] = useState(0); // appointments_booked
 
-  // Outcomes (automatic, from meetings) — two attribution angles
+  // Meetings outcomes (from simplified meetings)
   const [occurredBookedBy, setOccurredBookedBy] = useState(0);
   const [showsBookedBy, setShowsBookedBy] = useState(0);
   const [ss2BookedBy, setSs2BookedBy] = useState(0);
-  const [closedBookedBy, setClosedBookedBy] = useState(0);
 
-  const [taken, setTaken] = useState(0);
+  const [takenShowed, setTakenShowed] = useState(0); // taken = attended_by AND showed_up
   const [ss2Taken, setSs2Taken] = useState(0);
-  const [closedTaken, setClosedTaken] = useState(0);
 
-  // init admin + staff
+  // init admin + staff + week list
   useEffect(() => {
     (async () => {
       try {
@@ -175,91 +201,66 @@ export default function AdminPerformancePage() {
     setPageMsg(null);
 
     try {
-      const weekStart = focusWeekStart;
-      const weekEndExclusive = addDaysISO(weekStart, 7);
+      const weekStartISO = focusWeekStart;
+      const weekEndExclusiveISO = addDaysISO(weekStartISO, 7);
 
-      // ---------- KPI: appointments_booked (manual) ----------
-      const subsRes = await supabase
-        .from("kpi_daily_submissions")
-        .select("id")
+      // Meetings range in UTC (DST-safe)
+      const weekStartUtcIso = melbMidnightToUtcIso(weekStartISO);
+      const weekEndUtcIso = melbMidnightToUtcIso(weekEndExclusiveISO);
+
+      // ---------- KPI: appointments_booked from daily_kpis ----------
+      const dkRes = await supabase
+        .from("daily_kpis")
+        .select("appointments_booked")
         .eq("user_id", selectedUserId)
-        .gte("entry_date", weekStart)
-        .lt("entry_date", weekEndExclusive);
+        .gte("entry_date", weekStartISO)
+        .lt("entry_date", weekEndExclusiveISO);
 
-      if (subsRes.error) throw new Error(subsRes.error.message);
+      if (dkRes.error) throw new Error(dkRes.error.message);
 
-      const submissionIds = (subsRes.data ?? []).map((s: any) => s.id);
       let booked = 0;
-
-      if (submissionIds.length > 0) {
-        // map field_id -> key
-        const { data: fields, error: fErr } = await supabase.from("kpi_fields").select("id, key");
-        if (fErr) throw new Error(fErr.message);
-
-        const keyById: Record<string, string> = {};
-        (fields ?? []).forEach((f: any) => (keyById[f.id] = f.key));
-
-        const valsRes = await supabase
-          .from("kpi_daily_values")
-          .select("submission_id, field_id, field_key, value_text")
-          .in("submission_id", submissionIds);
-
-        if (valsRes.error) throw new Error(valsRes.error.message);
-
-        (valsRes.data ?? []).forEach((v: any) => {
-          const key = String(v.field_key ?? keyById[v.field_id] ?? "");
-          if (key !== "appointments_booked") return;
-
-          const num = Number(String(v.value_text ?? "").trim());
-          if (!Number.isNaN(num)) booked += num;
-        });
-      }
-
+      (dkRes.data ?? []).forEach((r: any) => {
+        booked += Number(r.appointments_booked ?? 0) || 0;
+      });
       setBookedKpi(booked);
 
-      // ---------- Meetings outcomes (automatic) ----------
-      // Use Melbourne week window. (Matches your other pages: +11 hardcode.)
-      const startMelb = new Date(`${weekStart}T00:00:00+11:00`);
-      const endMelb = new Date(`${weekEndExclusive}T00:00:00+11:00`);
-
+      // ---------- Meetings outcomes (simplified schema) ----------
+      // Include discarded rows in totals (history), but only count occurred meetings.
       const mRes = await supabase
-  .from("meetings")
-  .select("id, meeting_at, booked_by_id, attended_by_id, showed_up, moved_to_ss2, is_closed, discarded_at")
-  .gte("meeting_at", startMelb.toISOString())
-  .lt("meeting_at", endMelb.toISOString());
+        .from("meetings")
+        .select("id, meeting_at, booked_by_id, attended_by_id, showed_up, moved_to_ss2, discarded_at")
+        .gte("meeting_at", weekStartUtcIso)
+        .lt("meeting_at", weekEndUtcIso);
 
       if (mRes.error) throw new Error(mRes.error.message);
 
       const all = (mRes.data ?? []) as MeetingRow[];
 
-      // Count only meetings that have already happened
       const nowMs = Date.now();
-const occurred = all.filter((m) => {
-  const t = Date.parse(m.meeting_at);
-  return Number.isFinite(t) && t <= nowMs;
-});
+      const occurred = all.filter((m) => {
+        const t = Date.parse(m.meeting_at);
+        return Number.isFinite(t) && t <= nowMs;
+      });
 
-      // Booked-by attribution (setter attribution)
+      // Booked-by attribution (booked_by_id)
       const bookedBy = occurred.filter((m) => m.booked_by_id === selectedUserId);
       const bookedByOccurred = bookedBy.length;
-      const bookedByShows = bookedBy.filter((m) => !!m.showed_up).length;
-      const bookedBySS2 = bookedBy.filter((m) => !!m.moved_to_ss2).length;
-      const bookedByClosed = bookedBy.filter((m) => !!m.is_closed).length;
+      const bookedByShows = bookedBy.filter((m) => m.showed_up === true).length;
+      const bookedBySS2 = bookedBy.filter((m) => m.moved_to_ss2 === true).length;
 
       setOccurredBookedBy(bookedByOccurred);
       setShowsBookedBy(bookedByShows);
       setSs2BookedBy(bookedBySS2);
-      setClosedBookedBy(bookedByClosed);
 
-      // Taken-by attribution (closer attribution) — only count taken if showed up
-      const takenRows = occurred.filter((m) => m.attended_by_id === selectedUserId && !!m.showed_up);
-      const takenCount = takenRows.length;
-      const takenSS2 = takenRows.filter((m) => !!m.moved_to_ss2).length;
-      const takenClosed = takenRows.filter((m) => !!m.is_closed).length;
+      // Taken-by attribution (attended_by_id) — ONLY meetings that showed up
+      const takenRows = occurred.filter(
+        (m) => m.attended_by_id === selectedUserId && m.showed_up === true
+      );
+      const takenShowedCount = takenRows.length;
+      const takenSS2Count = takenRows.filter((m) => m.moved_to_ss2 === true).length;
 
-      setTaken(takenCount);
-      setSs2Taken(takenSS2);
-      setClosedTaken(takenClosed);
+      setTakenShowed(takenShowedCount);
+      setSs2Taken(takenSS2Count);
     } catch (e: any) {
       setPageMsg(e?.message ?? "Failed to load week stats.");
 
@@ -268,11 +269,9 @@ const occurred = all.filter((m) => {
       setOccurredBookedBy(0);
       setShowsBookedBy(0);
       setSs2BookedBy(0);
-      setClosedBookedBy(0);
 
-      setTaken(0);
+      setTakenShowed(0);
       setSs2Taken(0);
-      setClosedTaken(0);
     }
   }, [selectedUserId, focusWeekStart]);
 
@@ -284,12 +283,15 @@ const occurred = all.filter((m) => {
 
   const weekEndLabel = focusWeekStart ? addDaysISO(focusWeekStart, 6) : "—";
 
-  // ✅ your chosen show rate model:
-  // show rate = shows / KPI booked
-  const showRateVsBooked = pct(showsBookedBy, bookedKpi);
+  // Your model:
+  // show rate = shows (booked_by) / booked KPI (appointments_booked)
+  const showRateVsBookedKpi = pct(showsBookedBy, bookedKpi);
 
-  // sanity show rate:
+  // sanity:
   const showRateVsOccurred = pct(showsBookedBy, occurredBookedBy);
+
+  // move rate (taken-by) = moved / showed (taken-by)
+  const moveRateTaken = pct(ss2Taken, takenShowed);
 
   return (
     <div className="min-h-[100dvh] bg-gray-50 p-4 text-black">
@@ -303,7 +305,7 @@ const occurred = all.filter((m) => {
               {selectedUserName} • {focusWeekStart || "—"} → {weekEndLabel}
             </div>
             <div className="mt-1 text-[11px] text-black/50">
-              Manual: <code>appointments_booked</code> • Automatic: meetings outcomes
+              KPI: <code>daily_kpis.appointments_booked</code> • Meetings: booked/taken outcomes
             </div>
           </div>
 
@@ -351,41 +353,36 @@ const occurred = all.filter((m) => {
             </div>
 
             <div className="text-[11px] text-black/50 leading-relaxed">
-              “Shows / SS2 / Closed (Booked by)” are attributed by <code>meetings.booked_by_id</code>. <br />
-              “Taken / SS2 / Closed (Taken by)” are attributed by <code>meetings.attended_by_id</code> (only if showed up). <br />
-              Outcomes only count for meetings that have already happened.
+              • “Booked-by” uses <code>meetings.booked_by_id</code> (setter attribution). <br />
+              • “Taken-by” uses <code>meetings.attended_by_id</code> but only counts those that <b>showed up</b>. <br />
+              • Only meetings that already happened are counted.
             </div>
           </div>
         </div>
 
         {/* Top stats */}
         <div className="grid grid-cols-2 gap-3 mb-3">
-          <Stat label="Appointments booked (KPI)" value={n(bookedKpi)} sub="Manual entry" />
-          <Stat label="Show rate (vs booked KPI)" value={showRateVsBooked} sub="Shows ÷ KPI booked" />
+          <Stat label="Appointments booked (KPI)" value={n(bookedKpi)} sub="From daily_kpis" />
+          <Stat label="Show rate (vs KPI booked)" value={showRateVsBookedKpi} sub="Shows ÷ KPI booked" />
         </div>
 
-        {/* Booked-by attribution (setter attribution) */}
+        {/* Booked-by attribution */}
         <div className="rounded-2xl border bg-white p-4 mb-3">
           <div className="text-sm font-semibold text-black">Booked-by outcomes</div>
-          <div className="mt-1 text-xs text-black/60">Meetings booked by this person (that already occurred)</div>
+          <div className="mt-1 text-xs text-black/60">Meetings booked by this person (occurred only)</div>
 
           <div className="mt-3 grid grid-cols-2 gap-3">
-            <Stat label="Meetings occurred" value={n(occurredBookedBy)} sub={`Show rate (vs occurred): ${showRateVsOccurred}`} />
+            <Stat
+              label="Meetings occurred"
+              value={n(occurredBookedBy)}
+              sub={`Show rate (vs occurred): ${showRateVsOccurred}`}
+            />
             <Stat label="Shows" value={n(showsBookedBy)} sub="showed_up = true" />
-            <Stat label="Moved to SS2" value={n(ss2BookedBy)} sub={occurredBookedBy ? `Rate: ${pct(ss2BookedBy, occurredBookedBy)}` : "Rate: —"} />
-            <Stat label="Closed" value={n(closedBookedBy)} sub={occurredBookedBy ? `Rate: ${pct(closedBookedBy, occurredBookedBy)}` : "Rate: —"} />
-          </div>
-        </div>
-
-        {/* Taken-by attribution (closer attribution) */}
-        <div className="rounded-2xl border bg-white p-4 mb-4">
-          <div className="text-sm font-semibold text-black">Taken-by outcomes</div>
-          <div className="mt-1 text-xs text-black/60">Meetings taken by this person (only those that showed up)</div>
-
-          <div className="mt-3 grid grid-cols-2 gap-3">
-            <Stat label="Meetings taken" value={n(taken)} sub="attended_by + showed_up" />
-            <Stat label="Moved to SS2" value={n(ss2Taken)} sub={taken ? `Rate: ${pct(ss2Taken, taken)}` : "Rate: —"} />
-            <Stat label="Closed" value={n(closedTaken)} sub={taken ? `Rate: ${pct(closedTaken, taken)}` : "Rate: —"} />
+            <Stat
+              label="Moved to SS2"
+              value={n(ss2BookedBy)}
+              sub={occurredBookedBy ? `Rate: ${pct(ss2BookedBy, occurredBookedBy)}` : "Rate: —"}
+            />
             <div className="rounded-2xl border bg-gray-50 p-4">
               <div className="text-xs font-semibold text-black/60">Quick</div>
               <div className="mt-3 grid gap-2">
@@ -405,6 +402,17 @@ const occurred = all.filter((m) => {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+
+        {/* Taken-by attribution */}
+        <div className="rounded-2xl border bg-white p-4 mb-4">
+          <div className="text-sm font-semibold text-black">Taken-by outcomes</div>
+          <div className="mt-1 text-xs text-black/60">Meetings taken by this person (only those that showed up)</div>
+
+          <div className="mt-3 grid grid-cols-2 gap-3">
+            <Stat label="Taken (showed up)" value={n(takenShowed)} sub="attended_by + showed_up" />
+            <Stat label="Moved to SS2" value={n(ss2Taken)} sub={`Move rate: ${moveRateTaken}`} />
           </div>
         </div>
 

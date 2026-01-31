@@ -5,10 +5,8 @@ import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
 type Tone = "red" | "amber" | "green" | "blue";
-
-const TEAM_ROLE = "setter"; // using setter as “team” bucket
-const KPI_SETUP_ROUTE = "/admin/kpi-templates";
-const ADMIN_PERFORMANCE_ROUTE = "/admin/performance";
+type RangeMode = "weekly" | "monthly";
+type ScopeMode = "team" | "person";
 
 function toneClasses(t: Tone) {
   switch (t) {
@@ -41,14 +39,25 @@ function n(v: number | null | undefined) {
   return String(v);
 }
 
-function pctFrom(achieved: number, target: number) {
-  if (!target || Number.isNaN(target)) return "—";
-  return `${Math.round((achieved / target) * 100)}%`;
-}
-
 function pctRatio(num: number, den: number) {
   if (!den || den <= 0) return "—";
   return `${Math.round((num / den) * 100)}%`;
+}
+
+/** Monday-start week in Melbourne time, returned as YYYY-MM-DD */
+function startOfWeekISO_Melb(today: Date) {
+  const local = new Date(today);
+  const day = local.getDay(); // 0 Sun .. 6 Sat
+  const diffToMon = (day + 6) % 7;
+  local.setDate(local.getDate() - diffToMon);
+  local.setHours(0, 0, 0, 0);
+  return melbISO(local);
+}
+
+function addDaysISO(iso: string, days: number) {
+  const d = new Date(`${iso}T00:00:00`);
+  d.setDate(d.getDate() + days);
+  return melbISO(d);
 }
 
 /**
@@ -57,10 +66,9 @@ function pctRatio(num: number, den: number) {
  * - ends (exclusive) on the 26th of next month
  */
 function businessMonthRangeISO(now: Date) {
-  // Use Melbourne calendar date for the "day" decision
-  const nowISO = melbISO(now); // YYYY-MM-DD (Melbourne)
+  const nowISO = melbISO(now);
   const y = Number(nowISO.slice(0, 4));
-  const m = Number(nowISO.slice(5, 7)) - 1; // JS month 0-11
+  const m = Number(nowISO.slice(5, 7)) - 1;
   const d = Number(nowISO.slice(8, 10));
 
   const start = new Date(now);
@@ -74,16 +82,41 @@ function businessMonthRangeISO(now: Date) {
   endExclusive.setDate(26);
   endExclusive.setHours(0, 0, 0, 0);
 
-  return {
-    monthStartISO: melbISO(start),
-    monthEndExclusiveISO: melbISO(endExclusive),
-  };
+  return { startISO: melbISO(start), endExclusiveISO: melbISO(endExclusive) };
 }
 
-function fmtMonthLabel(startISO: string, endExclusiveISO: string) {
+function fmtRangeLabel(startISO: string, endExclusiveISO: string) {
   const end = new Date(`${endExclusiveISO}T00:00:00`);
   end.setDate(end.getDate() - 1);
   return `${startISO} → ${melbISO(end)}`;
+}
+
+/**
+ * Convert Melbourne “YYYY-MM-DD” midnight into a UTC ISO string using the
+ * correct Melbourne offset for that date (handles DST).
+ */
+function melbMidnightToUtcIso(dateISO: string) {
+  const baseUtc = new Date(`${dateISO}T00:00:00Z`);
+
+  const parts = new Intl.DateTimeFormat("en-AU", {
+    timeZone: "Australia/Melbourne",
+    timeZoneName: "shortOffset",
+    year: "numeric",
+  }).formatToParts(baseUtc);
+
+  const tz = parts.find((p) => p.type === "timeZoneName")?.value ?? "GMT+11";
+  const m = tz.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/);
+
+  let offsetMin = 11 * 60;
+  if (m) {
+    const sign = m[1] === "-" ? -1 : 1;
+    const hh = Number(m[2] ?? "0");
+    const mm = Number(m[3] ?? "0");
+    offsetMin = sign * (hh * 60 + mm);
+  }
+
+  const melbMidnightUtcMs = Date.parse(`${dateISO}T00:00:00Z`) - offsetMin * 60_000;
+  return new Date(melbMidnightUtcMs).toISOString();
 }
 
 function StatCard({
@@ -116,88 +149,75 @@ function StatCard({
   );
 }
 
-function Panel({
-  title,
-  right,
-  children,
-}: {
-  title: string;
-  right?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="rounded-2xl border bg-white p-4">
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-sm font-semibold text-black">{title}</div>
-        {right}
-      </div>
-      <div className="mt-3">{children}</div>
-    </div>
-  );
-}
-
-type ProfileRow = { id: string; role: string | null; is_admin: boolean | null };
-
-type TargetRow = {
-  role: string;
-  kpi_key: string;
-  target_monthly: number | null;
-  target_weekly: number | null;
-  active: boolean;
-};
-
-type MeetingOutcomeRow = {
+type PersonRow = {
   id: string;
-  meeting_at: string;
-  booked_by_id: string | null;
-  showed_up: boolean | null;
-  moved_to_ss2: boolean | null;
-  is_closed: boolean | null;
-  discarded_at: string | null;
-  lead_score: number | null;
-  owner_id: string | null;
-  booked_calendar_user_id: string | null;
+  full_name: string | null;
 };
 
-function ownerIdForHotLead(m: MeetingOutcomeRow) {
-  return m.owner_id ?? m.booked_by_id ?? m.booked_calendar_user_id ?? null;
-}
-
-export default function AdminControlCentrePage() {
+export default function AdminHubPage() {
   const router = useRouter();
 
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState<string | null>(null);
 
+  // Toggles
+  const [rangeMode, setRangeMode] = useState<RangeMode>("monthly");
+  const [scopeMode, setScopeMode] = useState<ScopeMode>("team");
+  const [people, setPeople] = useState<PersonRow[]>([]);
+  const [personId, setPersonId] = useState<string>("");
+
   const todayISO = useMemo(() => melbISO(new Date()), []);
-  const { monthStartISO, monthEndExclusiveISO } = useMemo(
-    () => businessMonthRangeISO(new Date()),
-    []
+
+  // Ranges
+  const monthly = useMemo(() => businessMonthRangeISO(new Date()), []);
+  const weekStartISO = useMemo(() => startOfWeekISO_Melb(new Date()), []);
+  const weekly = useMemo(
+    () => ({ startISO: weekStartISO, endExclusiveISO: addDaysISO(weekStartISO, 7) }),
+    [weekStartISO]
   );
-  const monthLabel = useMemo(
-    () => fmtMonthLabel(monthStartISO, monthEndExclusiveISO),
-    [monthStartISO, monthEndExclusiveISO]
+
+  const activeRange = rangeMode === "monthly" ? monthly : weekly;
+  const rangeLabel = useMemo(
+    () => fmtRangeLabel(activeRange.startISO, activeRange.endExclusiveISO),
+    [activeRange.startISO, activeRange.endExclusiveISO]
   );
 
-  const [adminUid, setAdminUid] = useState<string>("");
+  // Meetings range (UTC)
+  const rangeStartUtcIso = useMemo(() => melbMidnightToUtcIso(activeRange.startISO), [activeRange.startISO]);
+  const rangeEndUtcIso = useMemo(() => melbMidnightToUtcIso(activeRange.endExclusiveISO), [activeRange.endExclusiveISO]);
 
-  // hot leads
-  const [hotTotal, setHotTotal] = useState(0);
-  const [hotUnassigned, setHotUnassigned] = useState(0);
-  const [hotMine, setHotMine] = useState(0);
+  // Today range (UTC)
+  const todayStartUtcIso = useMemo(() => melbMidnightToUtcIso(todayISO), [todayISO]);
+  const todayEndExclusiveUtcIso = useMemo(() => melbMidnightToUtcIso(addDaysISO(todayISO, 1)), [todayISO]);
 
-  // today
+  // Admin state
+  const [myRole, setMyRole] = useState<string>("");
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  // KPI
+  const [todaySubmitted, setTodaySubmitted] = useState(false);
+
+  // Totals
+  const [bookedKpi, setBookedKpi] = useState(0);
+  const [meetingsOccurred, setMeetingsOccurred] = useState(0);
+  const [shows, setShows] = useState(0);
+  const [moved, setMoved] = useState(0);
+
+  // Today totals (hide discarded)
   const [todayMeetings, setTodayMeetings] = useState(0);
-  const [todayClosed, setTodayClosed] = useState(0);
+  const [todayShows, setTodayShows] = useState(0);
 
-  // monthly targets map: key -> target_monthly
-  const [targets, setTargets] = useState<Record<string, number>>({});
+  const scopeLabel = useMemo(() => {
+    if (scopeMode === "team") return "Team";
+    const p = people.find((x) => x.id === personId);
+    return p?.full_name ?? "Person";
+  }, [scopeMode, people, personId]);
 
-  // monthly totals
-  const [mBooked, setMBooked] = useState(0); // KPI: appointments_booked (team)
-  const [mShows, setMShows] = useState(0); // meetings: showed_up
-  const [mSS2, setMSS2] = useState(0); // meetings: moved_to_ss2
-  const [mClosed, setMClosed] = useState(0); // meetings: is_closed
+  const effectivePersonId = useMemo(() => {
+    if (scopeMode !== "person") return "";
+    if (personId) return personId;
+    return people[0]?.id ?? "";
+  }, [scopeMode, personId, people]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -211,10 +231,9 @@ export default function AdminControlCentrePage() {
     }
 
     const uid = session.user.id;
-    setAdminUid(uid);
 
     try {
-      // --- Require admin ---
+      // Require admin
       const meRes = await supabase
         .from("profiles")
         .select("id, role, is_admin")
@@ -225,174 +244,167 @@ export default function AdminControlCentrePage() {
 
       const role = normRole(meRes.data?.role);
       const adminFlag = !!meRes.data?.is_admin || role === "admin";
+      setMyRole(role);
+      setIsAdmin(adminFlag);
+
       if (!adminFlag) {
         router.push("/hub");
         return;
       }
 
-      // --- Targets (MONTHLY) ---
-      const tRes = await supabase
-        .from("kpi_targets")
-        .select("role, kpi_key, target_monthly, target_weekly, active")
-        .eq("role", TEAM_ROLE)
-        .eq("active", true);
+      // People list (for person toggle)
+      const pplRes = await supabase
+        .from("profiles")
+        .select("id, full_name")
+        .order("full_name", { ascending: true });
 
-      if (tRes.error) throw new Error(tRes.error.message);
+      if (pplRes.error) throw new Error(pplRes.error.message);
 
-      const tMap: Record<string, number> = {};
-      (tRes.data as TargetRow[] | null)?.forEach((r) => {
-        // admin hub uses MONTHLY
-        tMap[r.kpi_key] = Number(r.target_monthly ?? 0) || 0;
-      });
-      setTargets(tMap);
+      const ppl = (pplRes.data ?? []) as PersonRow[];
+      setPeople(ppl);
 
-      // --- All users (sum across everyone) ---
-      const profRes = await supabase.from("profiles").select("id, role, is_admin");
-      if (profRes.error) throw new Error(profRes.error.message);
-
-      const allUserIds = ((profRes.data as ProfileRow[] | null) ?? [])
-        .map((p) => p.id)
-        .filter(Boolean);
-
-      // --- MONTHLY booked (KPI entries) ---
-      const subsRes = await supabase
-        .from("kpi_daily_submissions")
-        .select("id, user_id")
-        .in("user_id", allUserIds.length ? allUserIds : [uid])
-        .gte("entry_date", monthStartISO)
-        .lt("entry_date", monthEndExclusiveISO);
-
-      if (subsRes.error) throw new Error(subsRes.error.message);
-
-      const subIds = (subsRes.data ?? []).map((s: any) => s.id);
-      let bookedSum = 0;
-
-      if (subIds.length) {
-        // Pull all values; filter in JS to avoid join complexity
-        const valsRes = await supabase
-          .from("kpi_daily_values")
-          .select("submission_id, value_text, field_key, field_id");
-
-        if (valsRes.error) throw new Error(valsRes.error.message);
-
-        const { data: fieldRows, error: fErr } = await supabase
-          .from("kpi_fields")
-          .select("id, key");
-
-        if (fErr) throw new Error(fErr.message);
-
-        const keyById: Record<string, string> = {};
-        (fieldRows ?? []).forEach((f: any) => (keyById[f.id] = f.key));
-
-        const relevant = (valsRes.data ?? []).filter((v: any) =>
-          subIds.includes(v.submission_id)
-        );
-
-        for (const v of relevant) {
-          const key = String(v.field_key ?? keyById[v.field_id] ?? "");
-          if (key !== "appointments_booked") continue;
-
-          const num = Number(String(v.value_text ?? "").trim());
-          if (!Number.isNaN(num)) bookedSum += num;
-        }
+      // If person mode and none selected yet, pick first person
+      if (scopeMode === "person" && !personId && ppl.length > 0) {
+        setPersonId(ppl[0].id);
       }
 
-      setMBooked(bookedSum);
+      const pid = scopeMode === "person" ? (effectivePersonId || ppl[0]?.id || "") : "";
 
-      // --- MONTHLY outcomes (meetings table) ---
-      // IMPORTANT: Discarded should still count toward KPI totals, so we DO NOT filter discarded_at here.
-      const startMelb = new Date(`${monthStartISO}T00:00:00+11:00`);
-      const endMelb = new Date(`${monthEndExclusiveISO}T00:00:00+11:00`);
+      // Today KPI submitted?
+      // - team: show admin's own submission status
+      // - person: show selected person's status
+      const kpiUid = scopeMode === "person" && pid ? pid : uid;
 
-      const mtgRes = await supabase
+      const todayKpiRes = await supabase
+        .from("daily_kpis")
+        .select("id")
+        .eq("user_id", kpiUid)
+        .eq("entry_date", todayISO)
+        .maybeSingle();
+
+      if (todayKpiRes.error) throw new Error(todayKpiRes.error.message);
+      setTodaySubmitted(!!todayKpiRes.data);
+
+      // -------------------------
+      // Booked KPI (daily_kpis)
+      // -------------------------
+      let bookedSum = 0;
+
+      let dkQ = supabase
+        .from("daily_kpis")
+        .select("user_id, entry_date, appointments_booked")
+        .gte("entry_date", activeRange.startISO)
+        .lt("entry_date", activeRange.endExclusiveISO);
+
+      if (scopeMode === "person" && pid) dkQ = dkQ.eq("user_id", pid);
+
+      const dkRes = await dkQ;
+      if (dkRes.error) throw new Error(dkRes.error.message);
+
+      (dkRes.data ?? []).forEach((r: any) => {
+        bookedSum += Number(r.appointments_booked ?? 0) || 0;
+      });
+
+      setBookedKpi(bookedSum);
+
+      // -------------------------
+      // Meetings (simplified schema)
+      // Period totals include discarded meetings (history stays)
+      // Scope=person uses attended_by_id (taker-owned outcomes)
+      // -------------------------
+      let mtgQ = supabase
         .from("meetings")
-        .select("id, meeting_at, showed_up, moved_to_ss2, is_closed, discarded_at")
-        .gte("meeting_at", startMelb.toISOString())
-        .lt("meeting_at", endMelb.toISOString());
+        .select("meeting_at, attended_by_id, showed_up, moved_to_ss2, discarded_at")
+        .gte("meeting_at", rangeStartUtcIso)
+        .lt("meeting_at", rangeEndUtcIso);
 
+      if (scopeMode === "person" && pid) mtgQ = mtgQ.eq("attended_by_id", pid);
+
+      const mtgRes = await mtgQ;
       if (mtgRes.error) throw new Error(mtgRes.error.message);
 
-      // occurred-only (meetings that have already happened)
       const nowMs = Date.now();
       const occurred = (mtgRes.data ?? []).filter((m: any) => {
         const t = Date.parse(m.meeting_at);
         return Number.isFinite(t) && t <= nowMs;
       });
 
-      setMShows(occurred.filter((m: any) => !!m.showed_up).length);
-      setMSS2(occurred.filter((m: any) => !!m.moved_to_ss2).length);
-      setMClosed(occurred.filter((m: any) => !!m.is_closed).length);
+      const occurredCount = occurred.length;
+      const showsCount = occurred.filter((m: any) => m.showed_up === true).length;
+      const movedCount = occurred.filter((m: any) => m.moved_to_ss2 === true).length;
 
-      // --- Hot leads counts (discarded excluded in UI) ---
-      const hotRes = await supabase
+      setMeetingsOccurred(occurredCount);
+      setShows(showsCount);
+      setMoved(movedCount);
+
+      // -------------------------
+      // Today meetings (hide discarded)
+      // Scope=person uses attended_by_id
+      // -------------------------
+      let todayQ = supabase
         .from("meetings")
-        .select("id, owner_id, booked_by_id, booked_calendar_user_id, lead_score, is_closed, discarded_at")
-        .eq("lead_score", 3)
-        .eq("is_closed", false)
+        .select("id, showed_up, meeting_at, attended_by_id, discarded_at")
+        .gte("meeting_at", todayStartUtcIso)
+        .lt("meeting_at", todayEndExclusiveUtcIso)
         .is("discarded_at", null);
 
-      if (hotRes.error) throw new Error(hotRes.error.message);
+      if (scopeMode === "person" && pid) todayQ = todayQ.eq("attended_by_id", pid);
 
-      const hotList = (hotRes.data ?? []) as unknown as MeetingOutcomeRow[];
-      setHotTotal(hotList.length);
-      setHotUnassigned(hotList.filter((m) => !ownerIdForHotLead(m)).length);
-      setHotMine(hotList.filter((m) => ownerIdForHotLead(m) === uid).length);
+      const todayRes = await todayQ;
+      if (todayRes.error) throw new Error(todayRes.error.message);
 
-      // --- Today meetings (discarded excluded in UI) ---
-      const todayStartMelb = new Date(`${todayISO}T00:00:00+11:00`);
-      const todayEndMelb = new Date(`${todayISO}T23:59:59.999+11:00`);
-
-      const todayRes = await supabase
-        .from("meetings")
-        .select("id, is_closed, meeting_at")
-        .gte("meeting_at", todayStartMelb.toISOString())
-        .lte("meeting_at", todayEndMelb.toISOString())
-        .is("discarded_at", null);
-
-      if (todayRes.error) {
-        setTodayMeetings(0);
-        setTodayClosed(0);
-      } else {
-        const m = todayRes.data ?? [];
-        setTodayMeetings(m.length);
-        setTodayClosed(m.filter((r: any) => !!r.is_closed).length);
-      }
+      const todayList = todayRes.data ?? [];
+      setTodayMeetings(todayList.length);
+      setTodayShows(todayList.filter((m: any) => m.showed_up === true).length);
 
       setLoading(false);
     } catch (e: any) {
       setMsg(e?.message ?? "Failed to load admin overview.");
       setLoading(false);
     }
-  }, [router, todayISO, monthStartISO, monthEndExclusiveISO]);
+  }, [
+    router,
+    todayISO,
+    activeRange.startISO,
+    activeRange.endExclusiveISO,
+    rangeStartUtcIso,
+    rangeEndUtcIso,
+    todayStartUtcIso,
+    todayEndExclusiveUtcIso,
+    rangeMode,
+    scopeMode,
+    personId,
+    effectivePersonId,
+  ]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const tBooked = targets["appointments_booked"] ?? 0;
-  const tShows = targets["meetings_attended"] ?? 0;
-  const tSS2 = targets["moved_to_ss2"] ?? 0;
-  const tClosed = targets["closed"] ?? 0;
-
-  const showRate = pctRatio(mShows, mBooked);
-
-  const hotTone: Tone = hotUnassigned > 0 ? "amber" : hotTotal > 0 ? "blue" : "green";
-  const closeTone: Tone = tClosed > 0 && mClosed < tClosed ? "amber" : "green";
+  const showRate = pctRatio(shows, meetingsOccurred);
+  const moveRate = pctRatio(moved, shows);
+  const kpiTone: Tone = todaySubmitted ? "green" : "amber";
 
   if (loading) return <div className="p-6 text-black">Loading…</div>;
 
   return (
     <div className="min-h-[100dvh] bg-gray-50 p-4 text-black">
       <div className="mx-auto w-full max-w-md">
+        {/* Header */}
         <div className="flex items-start justify-between gap-3 mb-4">
           <div>
             <div className="text-xs text-black/60">Admin</div>
             <h1 className="text-2xl font-semibold">Admin Overview</h1>
             <div className="mt-1 text-xs text-black/60">
-              Month: {monthLabel} • Today (Melbourne): {todayISO}
+              Scope: <b>{scopeLabel}</b> • Period ({rangeMode}): {rangeLabel} • Today: {todayISO}
             </div>
             <div className="mt-1 text-[11px] text-black/50">
-              Admin view is overall (team totals). Discarded meetings are hidden in UI but still count for KPI totals.
+              Logged in as: <span className="font-medium">{myRole || "admin"}</span>
+              {isAdmin ? " (admin)" : ""}
+            </div>
+            <div className="mt-1 text-[11px] text-black/50">
+              Period totals include discarded meetings. Today totals hide discarded.
+              {scopeMode === "person" ? " Person scope attributes outcomes by attended_by_id." : ""}
             </div>
           </div>
 
@@ -406,19 +418,85 @@ export default function AdminControlCentrePage() {
           </div>
         </div>
 
+        {/* RANGE TOGGLE */}
+        <div className="mb-3 rounded-2xl border bg-white p-2 flex gap-2">
+          <button
+            type="button"
+            onClick={() => setRangeMode("weekly")}
+            className={`flex-1 rounded-xl px-3 py-2 text-sm border ${
+              rangeMode === "weekly" ? "bg-black text-white" : "bg-white text-black"
+            }`}
+          >
+            Weekly
+          </button>
+          <button
+            type="button"
+            onClick={() => setRangeMode("monthly")}
+            className={`flex-1 rounded-xl px-3 py-2 text-sm border ${
+              rangeMode === "monthly" ? "bg-black text-white" : "bg-white text-black"
+            }`}
+          >
+            Monthly
+          </button>
+        </div>
+
+        {/* SCOPE TOGGLE */}
+        <div className="mb-3 rounded-2xl border bg-white p-2">
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setScopeMode("team")}
+              className={`flex-1 rounded-xl px-3 py-2 text-sm border ${
+                scopeMode === "team" ? "bg-black text-white" : "bg-white text-black"
+              }`}
+            >
+              Team
+            </button>
+            <button
+              type="button"
+              onClick={() => setScopeMode("person")}
+              className={`flex-1 rounded-xl px-3 py-2 text-sm border ${
+                scopeMode === "person" ? "bg-black text-white" : "bg-white text-black"
+              }`}
+            >
+              Person
+            </button>
+          </div>
+
+          {scopeMode === "person" ? (
+            <div className="mt-2">
+              <select
+                className="w-full rounded-xl border px-3 py-2 text-sm bg-white"
+                value={effectivePersonId}
+                onChange={(e) => setPersonId(e.target.value)}
+              >
+                {people.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.full_name ?? p.id}
+                  </option>
+                ))}
+              </select>
+              <div className="mt-1 text-[11px] text-black/50">
+                Person scope uses <b>meetings.attended_by_id</b> for shows/moved.
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        {/* CARDS */}
         <div className="grid grid-cols-2 gap-3 mb-3">
           <StatCard
-            title="Hot leads"
-            value={n(hotTotal)}
-            subtitle={`Unassigned: ${n(hotUnassigned)} • Mine: ${n(hotMine)}`}
-            tone={hotTone}
-            onClick={() => router.push("/admin/hot-leads")}
+            title="Today KPI"
+            value={todaySubmitted ? "✅" : "—"}
+            subtitle={todaySubmitted ? "Submitted" : "Not submitted"}
+            tone={kpiTone}
+            onClick={() => router.push("/daily-kpis")}
           />
 
           <StatCard
             title="Meetings today"
             value={n(todayMeetings)}
-            subtitle={`Closed today: ${n(todayClosed)}`}
+            subtitle={`Shows today: ${n(todayShows)}`}
             tone="blue"
             onClick={() => router.push("/meetings")}
           />
@@ -426,120 +504,77 @@ export default function AdminControlCentrePage() {
 
         <div className="grid grid-cols-2 gap-3 mb-3">
           <StatCard
-            title="Booked (this month)"
-            value={n(mBooked)}
-            subtitle={`Target: ${n(tBooked)} • ${pctFrom(mBooked, tBooked)} • Show rate: ${showRate}`}
+            title="Booked"
+            value={n(bookedKpi)}
+            subtitle={`Period: ${rangeLabel}`}
             tone="green"
             onClick={() => router.push("/daily-kpis")}
           />
 
           <StatCard
-            title="Shows (this month)"
-            value={n(mShows)}
-            subtitle={`Target: ${n(tShows)} • ${pctFrom(mShows, tShows)}`}
-            tone="green"
+            title="Meetings on calendar"
+            value={n(meetingsOccurred)}
+            subtitle={`Show rate: ${showRate}`}
+            tone="blue"
             onClick={() => router.push("/meetings")}
           />
         </div>
 
         <div className="grid grid-cols-2 gap-3 mb-4">
           <StatCard
-            title="SS2 (this month)"
-            value={n(mSS2)}
-            subtitle={`Target: ${n(tSS2)} • ${pctFrom(mSS2, tSS2)}`}
+            title="Shows"
+            value={n(shows)}
+            subtitle={`Moved: ${n(moved)} • Move rate: ${moveRate}`}
             tone="green"
             onClick={() => router.push("/meetings")}
           />
 
           <StatCard
-            title="Closed (this month)"
-            value={n(mClosed)}
-            subtitle={`Target: ${n(tClosed)} • ${pctFrom(mClosed, tClosed)}`}
-            tone={closeTone}
+            title="Moved to SS2"
+            value={n(moved)}
+            subtitle={`From shows: ${n(shows)} • ${moveRate}`}
+            tone={shows > 0 && moved === 0 ? "amber" : "green"}
             onClick={() => router.push("/meetings")}
           />
         </div>
 
-        <div className="space-y-3">
-          <Panel
-            title="Priority"
-            right={
-              <button
-                onClick={() => router.push("/admin/hot-leads")}
-                className="rounded-xl border bg-white px-3 py-2 text-xs"
-              >
-                Open hot leads
-              </button>
-            }
-          >
-            {hotUnassigned > 0 ? (
-              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
-                <div className="font-semibold">Unassigned hot leads: {hotUnassigned}</div>
-                <div className="text-xs opacity-80 mt-1">Assign owners so nothing gets missed.</div>
-              </div>
-            ) : hotTotal > 0 ? (
-              <div className="rounded-xl border border-blue-200 bg-blue-50 p-3">
-                <div className="font-semibold">Hot leads in play: {hotTotal}</div>
-                <div className="text-xs opacity-80 mt-1">Check the queue.</div>
-              </div>
-            ) : (
-              <div className="rounded-xl border border-green-200 bg-green-50 p-3">
-                <div className="font-semibold">No hot leads ✅</div>
-                <div className="text-xs opacity-80 mt-1">Focus on bookings and outcomes.</div>
-              </div>
-            )}
-          </Panel>
+        {/* ADMIN TOOLS */}
+        <div className="rounded-2xl border bg-white p-4">
+          <div className="text-sm font-semibold">Admin tools</div>
 
-          <Panel
-            title="Admin tools"
-            right={
-              <button
-                onClick={() => router.push(KPI_SETUP_ROUTE)}
-                className="rounded-xl bg-black px-3 py-2 text-xs text-white"
-              >
-                KPI Setup
-              </button>
-            }
-          >
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => router.push("/admin/hot-leads")}
-                className="rounded-xl border bg-white px-3 py-3 text-left"
-              >
-                <div className="text-sm font-semibold">Hot Leads</div>
-                <div className="text-xs text-black/60 mt-1">Owners + queue</div>
-              </button>
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <button
+              onClick={() => router.push("/meetings")}
+              className="rounded-xl border bg-white px-3 py-3 text-left"
+            >
+              <div className="text-sm font-semibold">Meetings</div>
+              <div className="text-xs text-black/60 mt-1">Outcomes + edits</div>
+            </button>
 
-              <button
-                onClick={() => router.push("/meetings")}
-                className="rounded-xl border bg-white px-3 py-3 text-left"
-              >
-                <div className="text-sm font-semibold">Meetings</div>
-                <div className="text-xs text-black/60 mt-1">Shows, SS2, closes</div>
-              </button>
+            <button
+              onClick={() => router.push("/daily-kpis")}
+              className="rounded-xl border bg-white px-3 py-3 text-left"
+            >
+              <div className="text-sm font-semibold">Daily KPIs</div>
+              <div className="text-xs text-black/60 mt-1">Appointments booked</div>
+            </button>
 
-              <button
-                onClick={() => router.push("/daily-kpis")}
-                className="rounded-xl border bg-white px-3 py-3 text-left"
-              >
-                <div className="text-sm font-semibold">Daily KPI Entry</div>
-                <div className="text-xs text-black/60 mt-1">Activity KPIs</div>
-              </button>
+            <button
+              onClick={() => router.push("/admin/kpi-templates")}
+              className="rounded-xl border bg-white px-3 py-3 text-left"
+            >
+              <div className="text-sm font-semibold">KPI Setup</div>
+              <div className="text-xs text-black/60 mt-1">Weekly targets</div>
+            </button>
 
-              {/* ✅ Replace duplicate KPI Setup card with Performance */}
-              <button
-                onClick={() => router.push(ADMIN_PERFORMANCE_ROUTE)}
-                className="rounded-xl border bg-white px-3 py-3 text-left"
-              >
-                <div className="text-sm font-semibold">Performance</div>
-                <div className="text-xs text-black/60 mt-1">Per-person breakdown</div>
-              </button>
-            </div>
-
-            <div className="mt-3 text-[11px] text-black/50">
-              KPI totals include discarded meetings (they’re hidden from UI lists, but still counted).
-            </div>
-          </Panel>
+            <button
+              onClick={() => router.push("/admin/performance")}
+              className="rounded-xl border bg-white px-3 py-3 text-left"
+            >
+              <div className="text-sm font-semibold">Performance</div>
+              <div className="text-xs text-black/60 mt-1">Per-person breakdown</div>
+            </button>
+          </div>
         </div>
 
         {msg && <div className="mt-4 rounded-xl border bg-gray-50 p-3 text-sm text-black">{msg}</div>}

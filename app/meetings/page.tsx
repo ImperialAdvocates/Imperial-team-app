@@ -16,23 +16,22 @@ type ProfileRow = {
 type MeetingRow = {
   id: string;
   meeting_name: string | null;
-  meeting_at: string;
+  meeting_at: string; // timestamptz
 
   booked_by_id: string;
   attended_by_id: string;
 
   lead_score: number;
+
   showed_up: boolean;
   moved_to_ss2: boolean;
 
-  is_closed: boolean;
-  closed_at: string | null;
-
-  booked_calendar_user_id: string | null;
-  discarded_at?: string | null;
-
+  discarded_at: string | null;
   created_at: string;
 };
+
+type PersonMode = "either" | "booked_by" | "taken_by";
+type RangePreset = "week" | "month" | "all";
 
 /* ---------------- Utils ---------------- */
 
@@ -73,6 +72,104 @@ function initials(name?: string | null) {
   return (parts[0][0] + parts[1][0]).toUpperCase();
 }
 
+function toISODateMelb(d: Date): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Australia/Melbourne",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+}
+
+/** Monday-start week in Melbourne time, returned as YYYY-MM-DD */
+function startOfWeekISO_Melb(today: Date) {
+  const local = new Date(today);
+  const day = local.getDay(); // 0 Sun .. 6 Sat
+  const diffToMon = (day + 6) % 7;
+  local.setDate(local.getDate() - diffToMon);
+  local.setHours(0, 0, 0, 0);
+  return toISODateMelb(local);
+}
+
+function addDaysISO(iso: string, days: number) {
+  const d = new Date(`${iso}T00:00:00`);
+  d.setDate(d.getDate() + days);
+  return toISODateMelb(d);
+}
+
+function fmtRangeShort(startISO: string, endExclusiveISO: string) {
+  const endLabel = addDaysISO(endExclusiveISO, -1);
+  return `${startISO} → ${endLabel}`;
+}
+
+/**
+ * Business month:
+ * - starts on the 26th
+ * - ends (exclusive) on the 26th of next month
+ */
+function businessMonthRangeISO(now: Date) {
+  const nowISO = toISODateMelb(now); // Melbourne date
+  const y = Number(nowISO.slice(0, 4));
+  const m = Number(nowISO.slice(5, 7)) - 1;
+  const d = Number(nowISO.slice(8, 10));
+
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+
+  if (d >= 26) start.setFullYear(y, m, 26);
+  else start.setFullYear(y, m - 1, 26);
+
+  const endExclusive = new Date(start);
+  endExclusive.setMonth(endExclusive.getMonth() + 1);
+  endExclusive.setDate(26);
+  endExclusive.setHours(0, 0, 0, 0);
+
+  return {
+    monthStartISO: toISODateMelb(start),
+    monthEndExclusiveISO: toISODateMelb(endExclusive),
+  };
+}
+
+/**
+ * Convert Melbourne “YYYY-MM-DD” midnight into a UTC ISO string using the
+ * correct Melbourne offset for that date (handles DST).
+ */
+function melbMidnightToUtcIso(dateISO: string) {
+  const baseUtc = new Date(`${dateISO}T00:00:00Z`);
+
+  const parts = new Intl.DateTimeFormat("en-AU", {
+    timeZone: "Australia/Melbourne",
+    timeZoneName: "shortOffset",
+    year: "numeric",
+  }).formatToParts(baseUtc);
+
+  const tz = parts.find((p) => p.type === "timeZoneName")?.value ?? "GMT+11";
+  const m = tz.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/);
+
+  let offsetMin = 11 * 60;
+  if (m) {
+    const sign = m[1] === "-" ? -1 : 1;
+    const hh = Number(m[2] ?? "0");
+    const mm = Number(m[3] ?? "0");
+    offsetMin = sign * (hh * 60 + mm);
+  }
+
+  const melbMidnightUtcMs = Date.parse(`${dateISO}T00:00:00Z`) - offsetMin * 60_000;
+  return new Date(melbMidnightUtcMs).toISOString();
+}
+
+function rangeLabel(
+  preset: RangePreset,
+  weekStartISO: string,
+  weekEndExclusiveISO: string,
+  monthStartISO: string,
+  monthEndExclusiveISO: string
+) {
+  if (preset === "week") return `This week: ${fmtRangeShort(weekStartISO, weekEndExclusiveISO)}`;
+  if (preset === "month") return `This month: ${fmtRangeShort(monthStartISO, monthEndExclusiveISO)}`;
+  return "All time";
+}
+
 /* ---------------- Component ---------------- */
 
 export default function MeetingsPage() {
@@ -94,16 +191,37 @@ export default function MeetingsPage() {
 
   const [meetings, setMeetings] = useState<MeetingRow[]>([]);
 
-  /* ---------------- Search ---------------- */
-  const [search, setSearch] = useState("");
+  /* ---------------- Filters ---------------- */
 
-  const filteredMeetings = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return meetings;
-    return meetings.filter((m) => (m.meeting_name ?? "").toLowerCase().includes(q));
-  }, [meetings, search]);
+  const [rangePreset, setRangePreset] = useState<RangePreset>("week");
+
+  const [searchInput, setSearchInput] = useState("");
+  const [searchApplied, setSearchApplied] = useState("");
+
+  const [personMode, setPersonMode] = useState<PersonMode>("either");
+  const [personId, setPersonId] = useState<string>(""); // "" = all
+
+  // Date windows
+  const weekStartISO = useMemo(() => startOfWeekISO_Melb(new Date()), []);
+  const weekEndExclusiveISO = useMemo(() => addDaysISO(weekStartISO, 7), [weekStartISO]);
+
+  const { monthStartISO, monthEndExclusiveISO } = useMemo(() => businessMonthRangeISO(new Date()), []);
+
+  // Active UTC range for meetings query
+  const rangeStartUtcIso = useMemo(() => {
+    if (rangePreset === "week") return melbMidnightToUtcIso(weekStartISO);
+    if (rangePreset === "month") return melbMidnightToUtcIso(monthStartISO);
+    return null;
+  }, [rangePreset, weekStartISO, monthStartISO]);
+
+  const rangeEndUtcIso = useMemo(() => {
+    if (rangePreset === "week") return melbMidnightToUtcIso(weekEndExclusiveISO);
+    if (rangePreset === "month") return melbMidnightToUtcIso(monthEndExclusiveISO);
+    return null;
+  }, [rangePreset, weekEndExclusiveISO, monthEndExclusiveISO]);
 
   /* ---------------- Create form ---------------- */
+
   const [meetingName, setMeetingName] = useState<string>("");
   const [meetingAtLocal, setMeetingAtLocal] = useState(() => toDatetimeLocalValue(new Date()));
 
@@ -113,80 +231,105 @@ export default function MeetingsPage() {
   const [leadScore, setLeadScore] = useState<number>(1);
   const [showedUp, setShowedUp] = useState<boolean>(true);
   const [movedToSs2, setMovedToSs2] = useState<boolean>(false);
-  const [isClosed, setIsClosed] = useState<boolean>(false);
 
   const [creating, setCreating] = useState(false);
   const [savingMeetingId, setSavingMeetingId] = useState<string | null>(null);
 
   /* ---------------- Load ---------------- */
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setMsg(null);
+  const load = useCallback(
+    async (overrideSearch?: string) => {
+      setLoading(true);
+      setMsg(null);
 
-    const { data: sessionData } = await supabase.auth.getSession();
-    const session = sessionData.session;
+      const { data: sessionData } = await supabase.auth.getSession();
+      const session = sessionData.session;
+      if (!session) {
+        router.push("/login");
+        return;
+      }
 
-    if (!session) {
-      router.push("/login");
-      return;
-    }
+      const uid = session.user.id;
+      setUserId(uid);
 
-    const uid = session.user.id;
-    setUserId(uid);
+      try {
+        // me
+        const meRes = await supabase.from("profiles").select("id, role, is_admin").eq("id", uid).single();
+        if (meRes.error) throw new Error(meRes.error.message);
 
-    try {
-      // me
-      const meRes = await supabase.from("profiles").select("id, role, is_admin").eq("id", uid).single();
-      if (meRes.error) throw new Error(meRes.error.message);
+        const r = normRole(meRes.data?.role);
+        setMyRole(r);
 
-      const r = normRole(meRes.data?.role);
-      setMyRole(r);
+        const adminFlag = !!meRes.data?.is_admin || r === "admin";
+        setIsAdmin(adminFlag);
 
-      const adminFlag = !!meRes.data?.is_admin || r === "admin";
-      setIsAdmin(adminFlag);
+        // profiles
+        const pRes = await supabase
+          .from("profiles")
+          .select("id, full_name, role, is_admin")
+          .order("full_name", { ascending: true });
 
-      // profiles
-      const pRes = await supabase
-        .from("profiles")
-        .select("id, full_name, role, is_admin")
-        .order("full_name", { ascending: true });
+        if (pRes.error) throw new Error(pRes.error.message);
+        setProfiles((pRes.data ?? []) as ProfileRow[]);
 
-      if (pRes.error) throw new Error(pRes.error.message);
+        // meetings query
+        let q = supabase
+          .from("meetings")
+          .select(
+            "id, meeting_name, meeting_at, booked_by_id, attended_by_id, lead_score, showed_up, moved_to_ss2, discarded_at, created_at"
+          )
+          .is("discarded_at", null)
+          .order("meeting_at", { ascending: false })
+          .limit(1000);
 
-      const profList = (pRes.data ?? []) as ProfileRow[];
-      setProfiles(profList);
+        // Range filter (week/month) — all-time skips this
+        if (rangePreset !== "all" && rangeStartUtcIso && rangeEndUtcIso) {
+          q = q.gte("meeting_at", rangeStartUtcIso).lt("meeting_at", rangeEndUtcIso);
+        }
 
-      // meetings (admin sees all; others see booked/taken by them)
-      const base = supabase
-        .from("meetings")
-        .select(
-          "id, meeting_name, meeting_at, booked_by_id, attended_by_id, lead_score, showed_up, moved_to_ss2, is_closed, closed_at, booked_calendar_user_id, created_at, discarded_at"
-        )
-        .is("discarded_at", null)
-        .order("meeting_at", { ascending: false })
-        .limit(300);
+        // Non-admin: keep it restricted
+        if (!adminFlag) {
+          q = q.or(`booked_by_id.eq.${uid},attended_by_id.eq.${uid}`);
+        }
 
-      const mtgRes = adminFlag ? await base : await base.or(`booked_by_id.eq.${uid},attended_by_id.eq.${uid}`);
-      if (mtgRes.error) throw new Error(mtgRes.error.message);
+        // Person filter
+        if (personId) {
+          if (personMode === "booked_by") q = q.eq("booked_by_id", personId);
+          else if (personMode === "taken_by") q = q.eq("attended_by_id", personId);
+          else q = q.or(`booked_by_id.eq.${personId},attended_by_id.eq.${personId}`);
+        }
 
-      setMeetings((mtgRes.data ?? []) as MeetingRow[]);
+        // Search
+        const term = (overrideSearch ?? searchApplied).trim();
+        if (term) q = q.ilike("meeting_name", `%${term}%`);
 
-      setLoading(false);
-    } catch (e: any) {
-      setMsg(e?.message ?? "Failed to load meetings.");
-      setLoading(false);
-    }
-  }, [router]);
+        const mtgRes = await q;
+        if (mtgRes.error) throw new Error(mtgRes.error.message);
 
+        setMeetings((mtgRes.data ?? []) as MeetingRow[]);
+        setLoading(false);
+      } catch (e: any) {
+        setMsg(e?.message ?? "Failed to load meetings.");
+        setLoading(false);
+      }
+    },
+    [router, rangePreset, rangeStartUtcIso, rangeEndUtcIso, personId, personMode, searchApplied]
+  );
+
+  // initial load
+  useEffect(() => {
+    load("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // reload when non-search filters change
   useEffect(() => {
     load();
-  }, [load]);
+  }, [rangePreset, personId, personMode]); // intentionally excludes searchInput
 
   // defaults once profiles loaded
   useEffect(() => {
     if (!userId || profiles.length === 0) return;
-
     if (!bookedById) setBookedById(userId);
     if (!attendedById) setAttendedById(userId);
   }, [userId, profiles, bookedById, attendedById]);
@@ -212,9 +355,6 @@ export default function MeetingsPage() {
         lead_score: leadScore,
         showed_up: showedUp,
         moved_to_ss2: movedToSs2,
-        booked_calendar_user_id: bookedById, // always mirror booked_by
-        is_closed: isClosed,
-        closed_at: isClosed ? new Date().toISOString() : null,
         discarded_at: null,
       };
 
@@ -223,12 +363,10 @@ export default function MeetingsPage() {
 
       await load();
 
-      // reset
       setMeetingName("");
       setLeadScore(1);
       setMovedToSs2(false);
       setShowedUp(true);
-      setIsClosed(false);
     } catch (e: any) {
       setMsg(e?.message ?? "Failed to create meeting.");
     } finally {
@@ -248,12 +386,9 @@ export default function MeetingsPage() {
         meeting_at: m.meeting_at,
         booked_by_id: m.booked_by_id,
         attended_by_id: m.attended_by_id,
-        booked_calendar_user_id: m.booked_by_id, // always mirror booked_by
         lead_score: m.lead_score,
         showed_up: m.showed_up,
         moved_to_ss2: m.moved_to_ss2,
-        is_closed: m.is_closed,
-        closed_at: m.is_closed ? (m.closed_at ?? new Date().toISOString()) : null,
       };
 
       const { error } = await supabase.from("meetings").update(payload).eq("id", m.id);
@@ -282,7 +417,6 @@ export default function MeetingsPage() {
 
       if (error) throw new Error(error.message);
 
-      // remove locally immediately (snappier)
       setMeetings((prev) => prev.filter((m) => m.id !== meetingId));
     } catch (e: any) {
       setMsg(e?.message ?? "Failed to discard meeting.");
@@ -305,7 +439,7 @@ export default function MeetingsPage() {
           <div>
             <h1 className="text-2xl font-semibold text-black">Meetings</h1>
             <div className="mt-1 text-xs text-black/60">
-              Update outcomes here • Discard removes it from view but keeps history for KPIs.
+              Simple meeting tracker (Booked by / Taken by / Score / Showed / Moved).
             </div>
             <div className="mt-1 text-[11px] text-black/50">
               Logged in as: <span className="font-medium">{myRole || "user"}</span>
@@ -314,27 +448,86 @@ export default function MeetingsPage() {
           </div>
 
           <div className="flex gap-2 flex-wrap justify-end">
-            <button
-              onClick={() => router.push("/hot-leads")}
-              className="rounded-xl border bg-white px-3 py-2 text-xs"
-            >
-              Hot Leads
-            </button>
             <button onClick={() => router.push("/hub")} className="rounded-xl border bg-white px-3 py-2 text-xs">
               Hub
             </button>
           </div>
         </div>
 
-        {/* Search */}
+        {/* Filters */}
         <div className="mb-4 rounded-2xl border bg-white p-4">
-          <div className="text-xs font-semibold text-black/60">Search meetings</div>
-          <input
-            className="mt-2 w-full rounded-xl border px-3 py-2 text-sm text-black"
-            placeholder="Type a name…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <div className="text-xs font-semibold text-black/60">Filters</div>
+              <div className="mt-1 text-[11px] text-black/50">
+                <b>{rangeLabel(rangePreset, weekStartISO, weekEndExclusiveISO, monthStartISO, monthEndExclusiveISO)}</b>
+              </div>
+            </div>
+
+            <div className="flex gap-2 flex-wrap">
+              <select
+                className="rounded-xl border px-3 py-2 text-sm bg-white"
+                value={rangePreset}
+                onChange={(e) => setRangePreset(e.target.value as RangePreset)}
+              >
+                <option value="week">This week</option>
+                <option value="month">This month</option>
+                <option value="all">All time</option>
+              </select>
+
+              <select
+                className="rounded-xl border px-3 py-2 text-sm bg-white"
+                value={personMode}
+                onChange={(e) => setPersonMode(e.target.value as PersonMode)}
+              >
+                <option value="either">Booked or Taken</option>
+                <option value="booked_by">Booked by</option>
+                <option value="taken_by">Taken by</option>
+              </select>
+
+              <select
+                className="rounded-xl border px-3 py-2 text-sm bg-white"
+                value={personId}
+                onChange={(e) => setPersonId(e.target.value)}
+              >
+                <option value="">All people</option>
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.full_name ?? p.id}
+                  </option>
+                ))}
+              </select>
+
+              <button
+                onClick={() => {
+                  const next = searchInput;
+                  setSearchApplied(next);
+                  load(next);
+                }}
+                className="rounded-xl border bg-white px-3 py-2 text-sm"
+              >
+                Apply
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-3">
+            <div className="text-xs font-semibold text-black/60">Search meetings</div>
+            <input
+              className="mt-2 w-full rounded-xl border px-3 py-2 text-sm text-black"
+              placeholder="Type a name…"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  const next = searchInput;
+                  setSearchApplied(next);
+                  load(next);
+                }
+              }}
+            />
+          </div>
         </div>
 
         {/* Create */}
@@ -342,7 +535,7 @@ export default function MeetingsPage() {
           <div className="flex items-start justify-between gap-3 flex-wrap">
             <div>
               <h2 className="text-sm font-semibold text-black">Add meeting</h2>
-              <div className="mt-1 text-xs text-black/60">Booker + taker + outcomes.</div>
+              <div className="mt-1 text-xs text-black/60">Booker + taker + score + outcomes.</div>
             </div>
 
             <button
@@ -359,7 +552,7 @@ export default function MeetingsPage() {
               <label className="text-xs font-medium text-black">Meeting name</label>
               <input
                 className="mt-1 w-full rounded-xl border px-3 py-2 text-sm text-black"
-                placeholder="e.g. Sachin – SS1"
+                placeholder="e.g. Sachin – IS"
                 value={meetingName}
                 onChange={(e) => setMeetingName(e.target.value)}
               />
@@ -373,6 +566,19 @@ export default function MeetingsPage() {
                 value={meetingAtLocal}
                 onChange={(e) => setMeetingAtLocal(e.target.value)}
               />
+            </div>
+
+            <div>
+              <label className="text-xs font-medium text-black">Lead score</label>
+              <select
+                className="mt-1 w-full rounded-xl border px-3 py-2 text-sm bg-white text-black"
+                value={leadScore}
+                onChange={(e) => setLeadScore(Number(e.target.value))}
+              >
+                <option value={1}>1</option>
+                <option value={2}>2</option>
+                <option value={3}>3 (Hot)</option>
+              </select>
             </div>
 
             <div>
@@ -405,35 +611,27 @@ export default function MeetingsPage() {
               </select>
             </div>
 
-            <div>
-              <label className="text-xs font-medium text-black">Lead score</label>
-              <select
-                className="mt-1 w-full rounded-xl border px-3 py-2 text-sm bg-white text-black"
-                value={String(leadScore)}
-                onChange={(e) => setLeadScore(Number(e.target.value))}
-              >
-                <option value="1">1 (Cold)</option>
-                <option value="2">2 (Warm)</option>
-                <option value="3">3 (Hot)</option>
-              </select>
-            </div>
-
             <div className="sm:col-span-2">
               <div className="text-xs font-medium text-black mb-2">Outcomes</div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <label className="flex items-center justify-between rounded-xl border px-3 py-2 text-sm bg-white">
                   <span className="text-black">Showed up</span>
-                  <input type="checkbox" className="h-4 w-4" checked={showedUp} onChange={(e) => setShowedUp(e.target.checked)} />
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4"
+                    checked={showedUp}
+                    onChange={(e) => setShowedUp(e.target.checked)}
+                  />
                 </label>
 
                 <label className="flex items-center justify-between rounded-xl border px-3 py-2 text-sm bg-white">
                   <span className="text-black">Moved to SS2</span>
-                  <input type="checkbox" className="h-4 w-4" checked={movedToSs2} onChange={(e) => setMovedToSs2(e.target.checked)} />
-                </label>
-
-                <label className="flex items-center justify-between rounded-xl border px-3 py-2 text-sm bg-white">
-                  <span className="text-black">Closed</span>
-                  <input type="checkbox" className="h-4 w-4" checked={isClosed} onChange={(e) => setIsClosed(e.target.checked)} />
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4"
+                    checked={movedToSs2}
+                    onChange={(e) => setMovedToSs2(e.target.checked)}
+                  />
                 </label>
               </div>
             </div>
@@ -444,24 +642,18 @@ export default function MeetingsPage() {
         <div className="rounded-2xl border bg-white p-5">
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <h2 className="text-sm font-semibold text-black">{isAdmin ? "All meetings" : "Your meetings"}</h2>
-            <button onClick={load} className="rounded-xl border bg-white px-3 py-2 text-xs">
-              Refresh
-            </button>
           </div>
 
-          {filteredMeetings.length === 0 ? (
+          {meetings.length === 0 ? (
             <div className="mt-4 text-sm text-black/70">No meetings found.</div>
           ) : (
             <div className="mt-4 space-y-3">
-              {filteredMeetings.map((m) => {
+              {meetings.map((m) => {
                 const bookedName = profilesById[m.booked_by_id]?.full_name ?? "—";
                 const takenName = profilesById[m.attended_by_id]?.full_name ?? "—";
 
                 return (
-                  <div
-                    key={m.id}
-                    className={`rounded-2xl border p-4 ${m.is_closed ? "bg-green-50 border-green-200" : "bg-white"}`}
-                  >
+                  <div key={m.id} className="rounded-2xl border p-4 bg-white">
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex items-center gap-3 min-w-0">
                         <div className="h-9 w-9 rounded-xl border bg-gray-50 flex items-center justify-center text-xs font-semibold">
@@ -472,7 +664,8 @@ export default function MeetingsPage() {
                           <div className="mt-1 text-xs text-black/60">{fmtDateTimeAU(m.meeting_at)}</div>
                           <div className="mt-1 text-xs text-black/60">
                             Booked: <span className="font-medium text-black">{bookedName}</span> • Taken:{" "}
-                            <span className="font-medium text-black">{takenName}</span>
+                            <span className="font-medium text-black">{takenName}</span> • Score:{" "}
+                            <span className="font-medium text-black">{m.lead_score ?? 1}</span>
                           </div>
                         </div>
                       </div>
@@ -482,7 +675,6 @@ export default function MeetingsPage() {
                           onClick={() => discardMeeting(m.id)}
                           disabled={savingMeetingId === m.id}
                           className="rounded-xl border px-3 py-2 text-xs bg-white text-black disabled:opacity-60"
-                          title="Hide this meeting (keeps data for KPIs)"
                         >
                           Discard
                         </button>
@@ -509,16 +701,24 @@ export default function MeetingsPage() {
                       </div>
 
                       <div>
+                        <label className="text-xs font-medium text-black">Lead score</label>
+                        <select
+                          className="mt-1 w-full rounded-xl border px-3 py-2 text-sm bg-white text-black"
+                          value={m.lead_score ?? 1}
+                          onChange={(e) => patchMeeting(m.id, { lead_score: Number(e.target.value) })}
+                        >
+                          <option value={1}>1</option>
+                          <option value={2}>2</option>
+                          <option value={3}>3 (Hot)</option>
+                        </select>
+                      </div>
+
+                      <div>
                         <label className="text-xs font-medium text-black">Booked by</label>
                         <select
                           className="mt-1 w-full rounded-xl border px-3 py-2 text-sm bg-white text-black"
                           value={m.booked_by_id}
-                          onChange={(e) =>
-                            patchMeeting(m.id, {
-                              booked_by_id: e.target.value,
-                              booked_calendar_user_id: e.target.value,
-                            })
-                          }
+                          onChange={(e) => patchMeeting(m.id, { booked_by_id: e.target.value })}
                         >
                           {profiles.map((p) => (
                             <option key={p.id} value={p.id}>
@@ -543,22 +743,9 @@ export default function MeetingsPage() {
                         </select>
                       </div>
 
-                      <div>
-                        <label className="text-xs font-medium text-black">Lead score</label>
-                        <select
-                          className="mt-1 w-full rounded-xl border px-3 py-2 text-sm bg-white text-black"
-                          value={String(m.lead_score)}
-                          onChange={(e) => patchMeeting(m.id, { lead_score: Number(e.target.value) })}
-                        >
-                          <option value="1">1 (Cold)</option>
-                          <option value="2">2 (Warm)</option>
-                          <option value="3">3 (Hot)</option>
-                        </select>
-                      </div>
-
-                      <div className="sm:col-span-2 lg:col-span-3">
+                      <div className="sm:col-span-2 lg:col-span-4">
                         <label className="text-xs font-medium text-black">Outcomes</label>
-                        <div className="mt-1 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div className="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-3">
                           <label className="flex items-center justify-between rounded-xl border px-3 py-2 text-sm bg-white">
                             <span className="text-black">Showed up</span>
                             <input
@@ -578,34 +765,9 @@ export default function MeetingsPage() {
                               onChange={(e) => patchMeeting(m.id, { moved_to_ss2: e.target.checked })}
                             />
                           </label>
-
-                          <label className="flex items-center justify-between rounded-xl border px-3 py-2 text-sm bg-white">
-                            <span className="text-black">Closed</span>
-                            <input
-                              type="checkbox"
-                              className="h-4 w-4"
-                              checked={m.is_closed}
-                              onChange={(e) =>
-                                patchMeeting(m.id, {
-                                  is_closed: e.target.checked,
-                                  closed_at: e.target.checked ? (m.closed_at ?? new Date().toISOString()) : null,
-                                })
-                              }
-                            />
-                          </label>
-                        </div>
-                      </div>
-
-                      <div className="flex items-end">
-                        <div className="text-[11px] text-black/50">
-                          {m.is_closed ? "Closed ✅" : m.lead_score === 3 ? "Hot lead 🔥" : "—"}
                         </div>
                       </div>
                     </div>
-
-                    {m.closed_at && m.is_closed ? (
-                      <div className="mt-2 text-[11px] text-black/50">Closed at: {fmtDateTimeAU(m.closed_at)}</div>
-                    ) : null}
                   </div>
                 );
               })}

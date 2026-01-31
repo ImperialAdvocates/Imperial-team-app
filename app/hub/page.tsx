@@ -6,10 +6,8 @@ import { supabase } from "@/lib/supabaseClient";
 import FocusTimer from "@/src/app/login/components/FocusTimer";
 
 type AlertCardTone = "red" | "amber" | "green" | "blue";
+type LeaderboardMode = "weekly" | "monthly";
 
-const TEAM_ROLE = "setter"; // using setter as “team” bucket
-const ADMIN_HUB_ROUTE = "/admin"; // your admin overview hub
-const KPI_SETUP_ROUTE = "/admin/kpi-templates"; // KPI setup page (admin-only)
 const LEADERBOARD_LIMIT = 10;
 
 /* ---------------- UI helpers ---------------- */
@@ -43,6 +41,21 @@ function normRole(r?: string | null) {
 function safeNum(x: any) {
   const n = Number(x);
   return Number.isFinite(n) ? n : 0;
+}
+
+function pctOrDash(numer: number, denom: number): { pctText: string; numer: number; denom: number } {
+  if (!denom) return { pctText: "—", numer, denom };
+  return { pctText: `${Math.round((numer / denom) * 100)}%`, numer, denom };
+}
+
+/** Monday-start week in Melbourne time, returned as YYYY-MM-DD */
+function startOfWeekISO_Melb(today: Date) {
+  const local = new Date(today);
+  const day = local.getDay();
+  const diffToMon = (day + 6) % 7;
+  local.setDate(local.getDate() - diffToMon);
+  local.setHours(0, 0, 0, 0);
+  return toISODateMelb(local);
 }
 
 /**
@@ -83,6 +96,34 @@ function fmtRangeShort(startISO: string, endExclusiveISO: string) {
   return `${startISO} → ${endLabel}`;
 }
 
+/**
+ * Convert a Melbourne “YYYY-MM-DD” midnight into a UTC ISO string using the
+ * correct Melbourne offset for that date (handles DST).
+ */
+function melbMidnightToUtcIso(dateISO: string) {
+  const baseUtc = new Date(`${dateISO}T00:00:00Z`);
+
+  const parts = new Intl.DateTimeFormat("en-AU", {
+    timeZone: "Australia/Melbourne",
+    timeZoneName: "shortOffset",
+    year: "numeric",
+  }).formatToParts(baseUtc);
+
+  const tz = parts.find((p) => p.type === "timeZoneName")?.value ?? "GMT+11";
+  const m = tz.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/);
+
+  let offsetMin = 11 * 60;
+  if (m) {
+    const sign = m[1] === "-" ? -1 : 1;
+    const hh = Number(m[2] ?? "0");
+    const mm = Number(m[3] ?? "0");
+    offsetMin = sign * (hh * 60 + mm);
+  }
+
+  const melbMidnightUtcMs = Date.parse(`${dateISO}T00:00:00Z`) - offsetMin * 60_000;
+  return new Date(melbMidnightUtcMs).toISOString();
+}
+
 function AlertCard({
   title,
   description,
@@ -99,15 +140,10 @@ function AlertCard({
   return (
     <div className={`rounded-2xl border p-4 ${toneClasses(tone)}`}>
       <div className="text-sm font-semibold leading-snug">{title}</div>
-      <div className="mt-2 text-xs leading-relaxed opacity-80 whitespace-pre-line">
-        {description}
-      </div>
+      <div className="mt-2 text-xs leading-relaxed opacity-80 whitespace-pre-line">{description}</div>
 
       {ctaLabel && onClick ? (
-        <button
-          onClick={onClick}
-          className="mt-4 w-full rounded-xl bg-black px-3 py-2 text-xs text-white"
-        >
+        <button onClick={onClick} className="mt-4 w-full rounded-xl bg-black px-3 py-2 text-xs text-white">
           {ctaLabel}
         </button>
       ) : null}
@@ -115,32 +151,7 @@ function AlertCard({
   );
 }
 
-/* ---------------- Data types ---------------- */
-
-type TargetRow = {
-  role: string;
-  kpi_key: string;
-  target_monthly: number | null;
-  target_weekly: number | null;
-  active: boolean;
-};
-
-type FieldRow = {
-  key: string;
-  label: string | null;
-  active: boolean;
-  input_type: string | null;
-};
-
-type HubMeetingRow = {
-  id: string;
-  lead_score: number | null;
-  is_closed: boolean | null;
-  owner_id?: string | null;
-  booked_calendar_user_id?: string | null;
-  booked_by_id?: string | null;
-  discarded_at?: string | null;
-};
+/* ---------------- Types ---------------- */
 
 type LeaderRow = {
   user_id: string;
@@ -148,27 +159,32 @@ type LeaderRow = {
 
   booked_kpi: number;
 
-  occurred_booked_by: number;
-  shows_booked_by: number;
-  ss2_booked_by: number;
-  closed_booked_by: number;
+  // BOOKER-owned (show rate)
+  booked_occurred: number;
+  booked_showed: number;
+  show_rate_text: string;
 
-  taken: number;
-  ss2_taken: number;
-  closed_taken: number;
+  // TAKER-owned (move rate)
+  taken_total: number;
+  taken_showed: number;
+  taken_moved: number;
+  move_rate_text: string;
+};
 
-  score: number;
+type WeeklyTargets = {
+  booked: number | null;     // appointments_booked weekly target
+  show_rate: number | null;  // optional %
+  move_rate: number | null;  // optional %
 };
 
 const ROUTES = {
   meetings: "/meetings",
   dailyKpis: "/daily-kpis",
-  hotLeads: "/hot-leads",
   docsAll: "/documents",
   profile: "/profile",
 } as const;
 
-/* ---------------- Dropdown helpers ---------------- */
+/* ---------------- Dropdown ---------------- */
 
 function useDropdownClose() {
   const [open, setOpen] = useState(false);
@@ -216,48 +232,22 @@ function QuickActionsDropdown({
         <div className="absolute right-0 mt-2 w-80 rounded-2xl border bg-white shadow-sm overflow-hidden z-50">
           <div className="px-3 py-2 text-xs font-semibold text-black/60">Core</div>
 
-          <button
-            onClick={() => go(ROUTES.meetings)}
-            className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50"
-          >
+          <button onClick={() => go(ROUTES.meetings)} className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50">
             📅 Meetings
-            <div className="text-xs text-black/50 mt-1">Update outcomes + booked by</div>
+            <div className="text-xs text-black/50 mt-1">View + update outcomes</div>
           </button>
 
-          <div className="px-3 py-2 text-xs font-semibold text-black/60">KPIs</div>
-
-          <button
-            onClick={() => go(ROUTES.dailyKpis)}
-            className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50"
-          >
+          <button onClick={() => go(ROUTES.dailyKpis)} className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50">
             📌 Daily KPI Entry
-            <div className="text-xs text-black/50 mt-1">Enter activity KPIs (dials, booked, etc.)</div>
+            <div className="text-xs text-black/50 mt-1">Appointments booked</div>
           </button>
 
-          <div className="px-3 py-2 text-xs font-semibold text-black/60">Hot leads</div>
-
-          <button
-            onClick={() => go(ROUTES.hotLeads)}
-            className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50"
-          >
-            🔥 Hot Leads
-            <div className="text-xs text-black/50 mt-1">Score 3 leads assigned to you</div>
-          </button>
-
-          <div className="px-3 py-2 text-xs font-semibold text-black/60">Documents</div>
-
-          <button
-            onClick={() => go(ROUTES.docsAll)}
-            className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50"
-          >
+          <button onClick={() => go(ROUTES.docsAll)} className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50">
             📄 Documents
             <div className="text-xs text-black/50 mt-1">Company docs + resources</div>
           </button>
 
-          <button
-            onClick={() => go(ROUTES.profile)}
-            className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50"
-          >
+          <button onClick={() => go(ROUTES.profile)} className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50">
             👤 Profile
             <div className="text-xs text-black/50 mt-1">Logout or delete account</div>
           </button>
@@ -265,21 +255,11 @@ function QuickActionsDropdown({
           {isAdmin ? (
             <>
               <div className="px-3 py-2 text-xs font-semibold text-black/60">Admin</div>
-
-              <button
-                onClick={() => go(ADMIN_HUB_ROUTE)}
-                className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50"
-              >
+              <button onClick={() => go("/admin")} className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50">
                 🛠 Admin Hub
-                <div className="text-xs text-black/50 mt-1">Admin overview</div>
               </button>
-
-              <button
-                onClick={() => go(KPI_SETUP_ROUTE)}
-                className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50"
-              >
+              <button onClick={() => go("/admin/kpi-templates")} className="w-full px-3 py-3 text-left text-sm hover:bg-gray-50">
                 🎯 KPI Setup
-                <div className="text-xs text-black/50 mt-1">Targets + assignments</div>
               </button>
             </>
           ) : null}
@@ -300,29 +280,54 @@ export default function HubPage() {
   const [myRole, setMyRole] = useState<string>("");
   const [isAdmin, setIsAdmin] = useState(false);
 
-  const [myHotLeadsCount, setMyHotLeadsCount] = useState<number>(0);
   const [todaySubmitted, setTodaySubmitted] = useState<boolean>(false);
 
-  const [targets, setTargets] = useState<TargetRow[]>([]);
-  const [fieldsByKey, setFieldsByKey] = useState<Record<string, FieldRow>>({});
-
-  // monthly leaderboard
   const [teamLeaders, setTeamLeaders] = useState<LeaderRow[]>([]);
+  const [leaderboardMode, setLeaderboardMode] = useState<LeaderboardMode>("weekly");
+
+  // ✅ weekly target banner data
+  const [weeklyTargets, setWeeklyTargets] = useState<WeeklyTargets | null>(null);
 
   const todayISO = useMemo(() => toISODateMelb(new Date()), []);
-  const { monthStartISO, monthEndExclusiveISO } = useMemo(
-    () => businessMonthRangeISO(new Date()),
-    []
-  );
 
-  // ✅ monthly targets for the “Monthly target” row
-  const monthlyTargetsByKey = useMemo(() => {
-    const m: Record<string, number> = {};
-    (targets ?? []).forEach((t) => {
-      m[t.kpi_key] = safeNum(t.target_monthly);
-    });
-    return m;
-  }, [targets]);
+  const { monthStartISO, monthEndExclusiveISO } = useMemo(() => businessMonthRangeISO(new Date()), []);
+  const weekStartISO = useMemo(() => startOfWeekISO_Melb(new Date()), []);
+  const weekEndExclusiveISO = useMemo(() => addDaysISO(weekStartISO, 7), [weekStartISO]);
+
+  const rangeStartISO = leaderboardMode === "monthly" ? monthStartISO : weekStartISO;
+  const rangeEndExclusiveISO = leaderboardMode === "monthly" ? monthEndExclusiveISO : weekEndExclusiveISO;
+
+  const rangeStartUtcIso = useMemo(() => melbMidnightToUtcIso(rangeStartISO), [rangeStartISO]);
+  const rangeEndUtcIso = useMemo(() => melbMidnightToUtcIso(rangeEndExclusiveISO), [rangeEndExclusiveISO]);
+
+  const loadWeeklyTargetsSafe = useCallback(async () => {
+    const res = await supabase
+      .from("kpi_targets")
+      .select("kpi_key, target_weekly, active, role")
+      .eq("active", true)
+      .eq("role", "setter");
+
+    if (res.error) {
+      // If table doesn't exist (or RLS), just show "Not set"
+      setWeeklyTargets(null);
+      return;
+    }
+
+    const next: WeeklyTargets = { booked: null, show_rate: null, move_rate: null };
+    const rows = (res.data ?? []) as any[];
+
+    for (const r of rows) {
+      const key = String(r.kpi_key ?? "").trim();
+      const val = Number(r.target_weekly ?? 0);
+      if (!Number.isFinite(val)) continue;
+
+      if (key === "appointments_booked") next.booked = val;
+      if (key === "show_rate") next.show_rate = val;
+      if (key === "ss2_rate") next.move_rate = val;
+    }
+
+    setWeeklyTargets(next);
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -338,7 +343,7 @@ export default function HubPage() {
     const uid = session.user.id;
 
     try {
-      // Profile
+      // My profile
       const myProfileRes = await supabase
         .from("profiles")
         .select("id, role, is_admin")
@@ -349,197 +354,116 @@ export default function HubPage() {
 
       const r = normRole(myProfileRes.data?.role);
       setMyRole(r);
-      setIsAdmin(!!myProfileRes.data?.is_admin || r === "admin");
+      const adminFlag = !!(myProfileRes.data as any)?.is_admin || r === "admin";
+      setIsAdmin(adminFlag);
 
-      // Hot leads (mine) — discarded removed from UI
-      const hotRes = await supabase
-        .from("meetings")
-        .select(
-          "id, lead_score, is_closed, owner_id, booked_calendar_user_id, booked_by_id, discarded_at"
-        )
-        .eq("lead_score", 3)
-        .eq("is_closed", false);
-
-      if (!hotRes.error) {
-        const list = (hotRes.data ?? []) as unknown as HubMeetingRow[];
-        const mine = list.filter((m) => {
-          if (m.discarded_at) return false;
-          const owner =
-            (m.owner_id ?? m.booked_calendar_user_id ?? m.booked_by_id) ?? "";
-          return owner === uid;
-        });
-        setMyHotLeadsCount(mine.length);
-      } else {
-        setMyHotLeadsCount(0);
-      }
+      // ✅ load weekly targets (safe fallback)
+      await loadWeeklyTargetsSafe();
 
       // Today KPI submitted?
-      const subRes = await supabase
-        .from("kpi_daily_submissions")
+      const todayKpiRes = await supabase
+        .from("daily_kpis")
         .select("id")
         .eq("user_id", uid)
         .eq("entry_date", todayISO)
         .maybeSingle();
 
-      if (subRes.error) throw new Error(subRes.error.message);
-      setTodaySubmitted(!!subRes.data);
+      if (todayKpiRes.error) throw new Error(todayKpiRes.error.message);
+      setTodaySubmitted(!!todayKpiRes.data);
 
-      // KPI field labels
-      const fieldsRes = await supabase
-        .from("kpi_fields")
-        .select("key, label, active, input_type")
-        .eq("active", true);
+      // Staff list
+      const profRes = await supabase
+        .from("profiles")
+        .select("id, full_name")
+        .order("full_name", { ascending: true });
 
-      if (fieldsRes.error) throw new Error(fieldsRes.error.message);
-
-      const fbk: Record<string, FieldRow> = {};
-      (fieldsRes.data ?? []).forEach((f: any) => {
-        fbk[f.key] = {
-          key: f.key,
-          label: f.label,
-          active: f.active,
-          input_type: f.input_type,
-        };
-      });
-      setFieldsByKey(fbk);
-
-      // ✅ Targets: pull BOTH monthly + weekly so the hub can show monthly targets correctly
-      const tgtRes = await supabase
-        .from("kpi_targets")
-        .select("role, kpi_key, target_monthly, target_weekly, active")
-        .eq("role", TEAM_ROLE)
-        .order("kpi_key", { ascending: true });
-
-      if (tgtRes.error) throw new Error(tgtRes.error.message);
-      setTargets(((tgtRes.data ?? []) as TargetRow[]).filter((t) => !!t.kpi_key));
-
-      // Staff list (for leaderboard)
-      const profRes = await supabase.from("profiles").select("id, full_name");
       if (profRes.error) throw new Error(profRes.error.message);
 
       const staff = (profRes.data ?? []) as { id: string; full_name: string | null }[];
       const userIds = staff.map((p) => p.id).filter(Boolean);
 
-      // Map field_id -> key
-      const { data: fieldRows, error: fieldErr } = await supabase
-        .from("kpi_fields")
-        .select("id, key");
-      if (fieldErr) throw new Error(fieldErr.message);
-
-      const keyByFieldId: Record<string, string> = {};
-      (fieldRows ?? []).forEach((f: any) => (keyByFieldId[f.id] = f.key));
-
-      // ---------------- KPI SUBMISSIONS (MONTH) ----------------
-      const bookedByUser: Record<string, number> = {};
-      const apptFieldId =
-        (fieldRows ?? []).find((f: any) => f.key === "appointments_booked")?.id ?? null;
-
+      // 1) Booked KPI (daily_kpis)
+      const bookedKpiByUser: Record<string, number> = {};
       if (userIds.length > 0) {
-        const subsAllRes = await supabase
-          .from("kpi_daily_submissions")
-          .select("id, user_id, entry_date")
+        const dkRes = await supabase
+          .from("daily_kpis")
+          .select("user_id, appointments_booked, entry_date")
           .in("user_id", userIds)
-          .gte("entry_date", monthStartISO)
-          .lt("entry_date", monthEndExclusiveISO);
+          .gte("entry_date", rangeStartISO)
+          .lt("entry_date", rangeEndExclusiveISO);
 
-        if (subsAllRes.error) throw new Error(subsAllRes.error.message);
+        if (dkRes.error) throw new Error(dkRes.error.message);
 
-        const subsAll = (subsAllRes.data ?? []) as any[];
-        const subIds = subsAll.map((s) => s.id);
-        const userBySubmission: Record<string, string> = {};
-        subsAll.forEach((s) => {
-          if (s?.id && s?.user_id) userBySubmission[s.id] = s.user_id;
+        (dkRes.data ?? []).forEach((row: any) => {
+          const u = row.user_id;
+          if (!u) return;
+          bookedKpiByUser[u] = (bookedKpiByUser[u] ?? 0) + safeNum(row.appointments_booked);
         });
-
-        if (subIds.length > 0) {
-          const valsRes = await supabase
-            .from("kpi_daily_values")
-            .select("submission_id, field_id, value_text")
-            .in("submission_id", subIds);
-
-          if (valsRes.error) throw new Error(valsRes.error.message);
-
-          (valsRes.data ?? []).forEach((v: any) => {
-            const u = userBySubmission[v.submission_id];
-            if (!u) return;
-
-            const num = safeNum(v.value_text);
-            if (!num) return;
-
-            const key = keyByFieldId[v.field_id];
-
-            if ((apptFieldId && v.field_id === apptFieldId) || key === "appointments_booked") {
-              bookedByUser[u] = (bookedByUser[u] ?? 0) + num;
-            }
-          });
-        }
       }
 
-      // ---------------- MEETINGS (MONTH) ----------------
-      // Discarded should still count for KPI, so do NOT filter discarded_at.
+      // 2) Meetings metrics (simplified schema)
       const mtgRes = await supabase
         .from("meetings")
-        .select("meeting_at, booked_by_id, attended_by_id, showed_up, moved_to_ss2, is_closed")
-        .gte("meeting_at", `${monthStartISO}T00:00:00`)
-        .lt("meeting_at", `${monthEndExclusiveISO}T00:00:00`);
+        .select("meeting_at, booked_by_id, attended_by_id, showed_up, moved_to_ss2, discarded_at")
+        .is("discarded_at", null)
+        .gte("meeting_at", rangeStartUtcIso)
+        .lt("meeting_at", rangeEndUtcIso);
 
       if (mtgRes.error) throw new Error(mtgRes.error.message);
 
       const nowMs = Date.now();
-      const allMeetings = (mtgRes.data ?? []) as any[];
+      const rowsMeet = (mtgRes.data ?? []) as any[];
 
-      const occurred = allMeetings.filter((m) => {
+      const bookedOccurredBy: Record<string, number> = {};
+      const bookedShowedBy: Record<string, number> = {};
+
+      const takenTotal: Record<string, number> = {};
+      const takenShowed: Record<string, number> = {};
+      const takenMoved: Record<string, number> = {};
+
+      rowsMeet.forEach((m: any) => {
+        const b = m.booked_by_id ?? null;
+        const a = m.attended_by_id ?? null;
+
         const t = Date.parse(m.meeting_at);
-        return Number.isFinite(t) && t <= nowMs;
-      });
+        const occurred = Number.isFinite(t) && t <= nowMs;
+        if (!occurred) return;
 
-      // Outcomes per user (occurred only)
-      const occurredBookedBy: Record<string, number> = {};
-      const showsBookedBy: Record<string, number> = {};
-      const ss2BookedBy: Record<string, number> = {};
-      const closedBookedBy: Record<string, number> = {};
+        const showed = m.showed_up === true;
 
-      const taken: Record<string, number> = {};
-      const ss2Taken: Record<string, number> = {};
-      const closedTaken: Record<string, number> = {};
-
-      occurred.forEach((m: any) => {
-        const b = m.booked_by_id;
+        // BOOKER-owned show rate (independent of taker)
         if (b) {
-          occurredBookedBy[b] = (occurredBookedBy[b] ?? 0) + 1;
-          if (m.showed_up) showsBookedBy[b] = (showsBookedBy[b] ?? 0) + 1;
-          if (m.moved_to_ss2) ss2BookedBy[b] = (ss2BookedBy[b] ?? 0) + 1;
-          if (m.is_closed) closedBookedBy[b] = (closedBookedBy[b] ?? 0) + 1;
+          bookedOccurredBy[b] = (bookedOccurredBy[b] ?? 0) + 1;
+          if (showed) bookedShowedBy[b] = (bookedShowedBy[b] ?? 0) + 1;
         }
 
-        const a = m.attended_by_id;
-        if (a && m.showed_up) {
-          taken[a] = (taken[a] ?? 0) + 1;
-          if (m.moved_to_ss2) ss2Taken[a] = (ss2Taken[a] ?? 0) + 1;
-          if (m.is_closed) closedTaken[a] = (closedTaken[a] ?? 0) + 1;
+        // TAKER-owned move rate (person-specific)
+        if (a) {
+          takenTotal[a] = (takenTotal[a] ?? 0) + 1;
+
+          if (showed) {
+            takenShowed[a] = (takenShowed[a] ?? 0) + 1;
+            if (m.moved_to_ss2 === true) takenMoved[a] = (takenMoved[a] ?? 0) + 1;
+          }
         }
       });
 
-      // Weighted score: closes > SS2 > shows > booked
-      const weights = {
-        closedTaken: 100,
-        ss2Taken: 20,
-        showsBookedBy: 5,
-        bookedKpi: 1,
-      } as const;
+      const leaders: LeaderRow[] = staff.map((u) => {
+        const booked_kpi = Math.round(bookedKpiByUser[u.id] ?? 0);
 
-      const leaderboardRows: LeaderRow[] = staff.map((u) => {
-        const booked_kpi = bookedByUser[u.id] ?? 0;
+        const booked_occurred = bookedOccurredBy[u.id] ?? 0;
+        const booked_showed = bookedShowedBy[u.id] ?? 0;
 
-        const shows_booked_by = showsBookedBy[u.id] ?? 0;
-        const ss2_taken = ss2Taken[u.id] ?? 0;
-        const closed_taken = closedTaken[u.id] ?? 0;
+        const showRate =
+          booked_occurred > 0
+            ? pctOrDash(booked_showed, booked_occurred)
+            : { pctText: "—", numer: booked_showed, denom: booked_occurred };
 
-        const score =
-          closed_taken * weights.closedTaken +
-          ss2_taken * weights.ss2Taken +
-          shows_booked_by * weights.showsBookedBy +
-          booked_kpi * weights.bookedKpi;
+        const taken_total = takenTotal[u.id] ?? 0;
+        const taken_showed = takenShowed[u.id] ?? 0;
+        const taken_moved = takenMoved[u.id] ?? 0;
+
+        const moveRate = pctOrDash(taken_moved, taken_showed);
 
         return {
           user_id: u.id,
@@ -547,37 +471,79 @@ export default function HubPage() {
 
           booked_kpi,
 
-          occurred_booked_by: occurredBookedBy[u.id] ?? 0,
-          shows_booked_by,
-          ss2_booked_by: ss2BookedBy[u.id] ?? 0,
-          closed_booked_by: closedBookedBy[u.id] ?? 0,
+          booked_occurred,
+          booked_showed,
+          show_rate_text: showRate.pctText,
 
-          taken: taken[u.id] ?? 0,
-          ss2_taken,
-          closed_taken,
-
-          score,
+          taken_total,
+          taken_showed,
+          taken_moved,
+          move_rate_text: moveRate.pctText,
         };
       });
 
-      leaderboardRows.sort((a, b) => b.score - a.score);
-      setTeamLeaders(leaderboardRows);
+      // Sort: booked_occurred desc, then show rate desc, then move rate desc, then taken_showed desc
+      leaders.sort((a, b) => {
+        if (b.booked_occurred !== a.booked_occurred) return b.booked_occurred - a.booked_occurred;
 
+        const ap = a.show_rate_text === "—" ? -1 : Number(a.show_rate_text.replace("%", ""));
+        const bp = b.show_rate_text === "—" ? -1 : Number(b.show_rate_text.replace("%", ""));
+        if (bp !== ap) return bp - ap;
+
+        const am = a.move_rate_text === "—" ? -1 : Number(a.move_rate_text.replace("%", ""));
+        const bm = b.move_rate_text === "—" ? -1 : Number(b.move_rate_text.replace("%", ""));
+        if (bm !== am) return bm - am;
+
+        return (b.taken_showed ?? 0) - (a.taken_showed ?? 0);
+      });
+
+      setTeamLeaders(leaders);
       setLoading(false);
     } catch (e: any) {
       setMsg(e?.message ?? "Failed to load hub.");
       setLoading(false);
     }
-  }, [router, todayISO, monthStartISO, monthEndExclusiveISO]);
+  }, [
+    router,
+    todayISO,
+    leaderboardMode,
+    rangeStartISO,
+    rangeEndExclusiveISO,
+    rangeStartUtcIso,
+    rangeEndUtcIso,
+    loadWeeklyTargetsSafe,
+  ]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const hotLeadTone: AlertCardTone = myHotLeadsCount > 0 ? "amber" : "green";
   const kpiTone: AlertCardTone = todaySubmitted ? "green" : "amber";
 
   if (loading) return <div className="py-4 text-black">Loading…</div>;
+
+  const weeklyTargetsText =
+  !weeklyTargets
+    ? "Weekly targets: Not set"
+    : (() => {
+        const parts: string[] = [];
+
+        if (weeklyTargets.booked !== null) {
+          parts.push(`Booked ${weeklyTargets.booked}`);
+        }
+
+        if (weeklyTargets.show_rate !== null) {
+          parts.push(`Show rate ${weeklyTargets.show_rate}%`);
+        }
+
+        if (weeklyTargets.move_rate !== null) {
+          parts.push(`SS2 ${weeklyTargets.move_rate}%`);
+        }
+
+        return parts.length
+          ? `Weekly targets: ${parts.join(" • ")}`
+          : "Weekly targets: Not set";
+      })();
 
   return (
     <div className="text-black">
@@ -585,9 +551,7 @@ export default function HubPage() {
       <div className="flex items-start justify-between gap-3 mb-5">
         <div>
           <h1 className="text-2xl font-semibold">Hub</h1>
-          <div className="mt-1 text-xs text-black/70">
-            Daily KPIs • Monthly leaderboard • Hot leads • Documents
-          </div>
+          <div className="mt-1 text-xs text-black/70">Leaderboard • KPIs • Meetings</div>
           <div className="mt-1 text-[11px] text-black/50">
             Logged in as: <span className="font-medium">{myRole || "user"}</span>
           </div>
@@ -596,72 +560,92 @@ export default function HubPage() {
         <div className="flex flex-col items-end gap-2">
           <div className="flex gap-2 flex-wrap justify-end items-center">
             <QuickActionsDropdown router={router} isAdmin={isAdmin} />
-            <button
-              onClick={load}
-              className="rounded-xl border px-4 py-2 text-sm bg-white"
-            >
+            <button onClick={load} className="rounded-xl border px-4 py-2 text-sm bg-white">
               Refresh
             </button>
           </div>
         </div>
       </div>
 
-{/* Focus Timer */}
-<div className="mb-4">
-  <FocusTimer />
-</div>
+      <div className="mb-4">
+        <FocusTimer />
+      </div>
 
-      {/* TOP PANELS */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-3 mb-4">
-        <AlertCard
-          tone={hotLeadTone}
-          title="🔥 Hot Leads"
-          description={
-            myHotLeadsCount > 0
-              ? `You have ${myHotLeadsCount} hot lead${
-                  myHotLeadsCount === 1 ? "" : "s"
-                } assigned to you.`
-              : "No hot leads assigned to you right now."
-          }
-          ctaLabel="Open"
-          onClick={() => router.push(ROUTES.hotLeads)}
-        />
-
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
         <AlertCard
           tone={kpiTone}
-          title="📌 Today’s KPIs"
-          description={
-            todaySubmitted
-              ? `Submitted for today (${todayISO}).`
-              : `Not submitted yet for today (${todayISO}).`
-          }
+          title="📌 Today’s KPI"
+          description={todaySubmitted ? `Submitted for today (${todayISO}).` : `Not submitted yet for today (${todayISO}).`}
           ctaLabel={todaySubmitted ? "Edit" : "Submit"}
           onClick={() => router.push(ROUTES.dailyKpis)}
         />
+
+        <AlertCard
+          tone="blue"
+          title="📅 Meetings"
+          description="Update outcomes (showed up / moved to SS2) and who booked/took the meeting."
+          ctaLabel="Open"
+          onClick={() => router.push(ROUTES.meetings)}
+        />
       </div>
 
-      {/* MONTHLY TEAM LEADERBOARD */}
+      {/* LEADERBOARD */}
       <div className="rounded-2xl border bg-white p-4 mb-6">
         <div className="flex items-start justify-between gap-3 flex-wrap">
           <div>
-            <div className="text-sm font-semibold">
-              🏆 Team leaderboard (monthly)
-            </div>
+            <div className="text-sm font-semibold">🏆 Team leaderboard ({leaderboardMode})</div>
             <div className="mt-1 text-xs text-black/60">
-              Period: {fmtRangeShort(monthStartISO, monthEndExclusiveISO)} •
-              Occurred-only • Discarded still counts
+              Period: {fmtRangeShort(rangeStartISO, rangeEndExclusiveISO)}
             </div>
-            <div className="mt-1 text-[11px] text-black/50">
-              Ranking updates automatically based on weighted score (closes + SS2
-              + shows + booked).
+
+            <div className="mt-2 text-[11px] text-black/50 whitespace-pre-line">
+              {"Show rate (Booked-by) = booked_showed / booked_occurred (regardless of who took it)"}
+              {"\n"}
+              {"Move rate (Taken-by) = taken_moved / taken_showed"}
             </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setLeaderboardMode("weekly")}
+              className={`rounded-xl border px-3 py-2 text-xs ${
+                leaderboardMode === "weekly" ? "bg-black text-white" : "bg-white text-black"
+              }`}
+              type="button"
+            >
+              Weekly
+            </button>
+            <button
+              onClick={() => setLeaderboardMode("monthly")}
+              className={`rounded-xl border px-3 py-2 text-xs ${
+                leaderboardMode === "monthly" ? "bg-black text-white" : "bg-white text-black"
+              }`}
+              type="button"
+            >
+              Monthly
+            </button>
           </div>
         </div>
 
-        {teamLeaders.length === 0 ? (
-          <div className="mt-3 text-sm text-black/60">
-            No leaderboard data yet.
+        {/* ✅ Weekly targets line */}
+        <div className="mt-3 rounded-xl border bg-gray-50 px-3 py-2 text-xs text-black/70 flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <span className="font-semibold text-black">{weeklyTargetsText}</span>
           </div>
+
+          {isAdmin ? (
+            <button
+              onClick={() => router.push("/admin/kpi-templates")}
+              className="rounded-lg border bg-white px-2 py-1 text-[11px] text-black"
+              type="button"
+            >
+              Set targets
+            </button>
+          ) : null}
+        </div>
+
+        {teamLeaders.length === 0 ? (
+          <div className="mt-3 text-sm text-black/60">No leaderboard data yet.</div>
         ) : (
           <div className="mt-3 overflow-x-auto">
             <table className="w-full text-sm">
@@ -671,77 +655,50 @@ export default function HubPage() {
                   <th className="py-2">Name</th>
                   <th className="py-2">Booked</th>
                   <th className="py-2">Shows</th>
-                  <th className="py-2">SS2</th>
-                  <th className="py-2">Closed</th>
+                  <th className="py-2">Show rate</th>
                   <th className="py-2">Taken</th>
-                  <th className="py-2">SS2 (Taken)</th>
-                  <th className="py-2">Closed (Taken)</th>
+                  <th className="py-2">Moved</th>
+                  <th className="py-2">Move rate</th>
                 </tr>
               </thead>
 
               <tbody>
-                {/* ✅ Targets row (monthly) */}
-                <tr className="border-t bg-gray-50">
-                  <td className="py-2 font-medium" colSpan={2}>
-                    Monthly target
-                  </td>
-                  <td className="py-2 font-medium">
-                    {safeNum(monthlyTargetsByKey["appointments_booked"])}
-                  </td>
-                  <td className="py-2 font-medium">
-                    {safeNum(monthlyTargetsByKey["meetings_attended"])}
-                  </td>
-                  <td className="py-2 font-medium">
-                    {safeNum(monthlyTargetsByKey["moved_to_ss2"])}
-                  </td>
-                  <td className="py-2 font-medium">
-                    {safeNum(monthlyTargetsByKey["closed"])}
-                  </td>
-                  <td className="py-2 font-medium">—</td>
-                  <td className="py-2 font-medium">—</td>
-                  <td className="py-2 font-medium">—</td>
-                </tr>
-
                 {teamLeaders.slice(0, LEADERBOARD_LIMIT).map((r, idx) => (
                   <tr key={r.user_id} className="border-t">
                     <td className="py-2">{idx + 1}</td>
                     <td className="py-2 font-medium">{r.name}</td>
-                    <td className="py-2">{r.booked_kpi}</td>
-                    <td className="py-2">{r.shows_booked_by}</td>
-                    <td className="py-2">{r.ss2_booked_by}</td>
-                    <td className="py-2">{r.closed_booked_by}</td>
-                    <td className="py-2">{r.taken}</td>
-                    <td className="py-2">{r.ss2_taken}</td>
-                    <td className="py-2">{r.closed_taken}</td>
+
+                    <td className="py-2">{safeNum(r.booked_kpi)}</td>
+
+                    <td className="py-2">{safeNum(r.booked_showed)}</td>
+
+                    <td className="py-2">
+                      {r.show_rate_text}{" "}
+                      <span className="text-[11px] text-black/40">
+                        ({safeNum(r.booked_showed)}/{safeNum(r.booked_occurred)})
+                      </span>
+                    </td>
+
+                    <td className="py-2">{safeNum(r.taken_showed)}</td>
+
+                    <td className="py-2">{safeNum(r.taken_moved)}</td>
+
+                    <td className="py-2">
+                      {r.move_rate_text}{" "}
+                      <span className="text-[11px] text-black/40">
+                        ({safeNum(r.taken_moved)}/{safeNum(r.taken_showed)})
+                      </span>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
 
             <div className="mt-2 text-[11px] text-black/50">
-              Score = (Closed Taken×100) + (SS2 Taken×20) + (Shows×5) + (Booked×1)
+              Sorted by booked occurred → show rate → move rate → taken.
             </div>
           </div>
         )}
-      </div>
-
-      {/* DOCUMENTS */}
-      <div className="rounded-2xl border bg-white p-5 mb-6">
-        <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div>
-            <div className="text-sm font-semibold">📄 Documents</div>
-            <div className="mt-1 text-xs text-black/70">
-              Store scripts, templates, and internal docs here.
-            </div>
-          </div>
-
-          <button
-            onClick={() => router.push(ROUTES.docsAll)}
-            className="rounded-xl bg-black px-4 py-2 text-xs text-white"
-          >
-            Open Documents
-          </button>
-        </div>
       </div>
 
       {msg && (
