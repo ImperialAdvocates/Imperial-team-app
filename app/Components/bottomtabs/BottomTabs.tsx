@@ -70,8 +70,8 @@ const hidden =
       },
       {
         label: "KPIs",
-        href: "/kpis",
-        match: (p) => p.startsWith("/kpis") || p.startsWith("/daily-kpis"),
+        href: "/daily-kpis",
+match: (p) => p.startsWith("/daily-kpis"),
       },
     ];
   }, [isAdminSection]);
