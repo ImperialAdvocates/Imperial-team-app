@@ -5,22 +5,8 @@ import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { AppShell, GlassCard, NeonButton, NeonBadge } from "@/app/Components/ui/app-ui";
 
-type Tone = "red" | "amber" | "green" | "blue";
 type RangeMode = "weekly" | "monthly";
 type ScopeMode = "team" | "person";
-
-function toneClasses(t: Tone) {
-  switch (t) {
-    case "red":
-      return "border-red-200 bg-red-50 text-red-900";
-    case "amber":
-      return "border-amber-200 bg-amber-50 text-amber-900";
-    case "green":
-      return "border-green-200 bg-green-50 text-green-900";
-    case "blue":
-      return "border-blue-200 bg-blue-50 text-blue-900";
-  }
-}
 
 function melbISO(d: Date) {
   return new Intl.DateTimeFormat("en-CA", {
@@ -120,36 +106,6 @@ function melbMidnightToUtcIso(dateISO: string) {
   return new Date(melbMidnightUtcMs).toISOString();
 }
 
-function StatCard({
-  title,
-  value,
-  subtitle,
-  tone = "blue",
-  onClick,
-}: {
-  title: string;
-  value: string;
-  subtitle?: string;
-  tone?: Tone;
-  onClick?: () => void;
-}) {
-  const clickable = typeof onClick === "function";
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`rounded-2xl border p-4 text-left w-full ${toneClasses(tone)} ${
-        clickable ? "hover:opacity-95 active:opacity-90" : "cursor-default"
-      }`}
-      disabled={!clickable}
-    >
-      <div className="text-xs font-semibold opacity-80">{title}</div>
-      <div className="mt-2 text-3xl font-semibold">{value}</div>
-      {subtitle ? <div className="mt-1 text-xs opacity-80">{subtitle}</div> : null}
-    </button>
-  );
-}
-
 type PersonRow = {
   id: string;
   full_name: string | null;
@@ -184,12 +140,21 @@ export default function AdminHubPage() {
   );
 
   // Meetings range (UTC)
-  const rangeStartUtcIso = useMemo(() => melbMidnightToUtcIso(activeRange.startISO), [activeRange.startISO]);
-  const rangeEndUtcIso = useMemo(() => melbMidnightToUtcIso(activeRange.endExclusiveISO), [activeRange.endExclusiveISO]);
+  const rangeStartUtcIso = useMemo(
+    () => melbMidnightToUtcIso(activeRange.startISO),
+    [activeRange.startISO]
+  );
+  const rangeEndUtcIso = useMemo(
+    () => melbMidnightToUtcIso(activeRange.endExclusiveISO),
+    [activeRange.endExclusiveISO]
+  );
 
   // Today range (UTC)
   const todayStartUtcIso = useMemo(() => melbMidnightToUtcIso(todayISO), [todayISO]);
-  const todayEndExclusiveUtcIso = useMemo(() => melbMidnightToUtcIso(addDaysISO(todayISO, 1)), [todayISO]);
+  const todayEndExclusiveUtcIso = useMemo(
+    () => melbMidnightToUtcIso(addDaysISO(todayISO, 1)),
+    [todayISO]
+  );
 
   // Admin state
   const [myRole, setMyRole] = useState<string>("");
@@ -264,7 +229,6 @@ export default function AdminHubPage() {
       const ppl = (pplRes.data ?? []) as PersonRow[];
       setPeople(ppl);
 
-      // If person mode and none selected yet, pick first person
       if (scopeMode === "person" && !personId && ppl.length > 0) {
         setPersonId(ppl[0].id);
       }
@@ -272,8 +236,6 @@ export default function AdminHubPage() {
       const pid = scopeMode === "person" ? (effectivePersonId || ppl[0]?.id || "") : "";
 
       // Today KPI submitted?
-      // - team: show admin's own submission status
-      // - person: show selected person's status
       const kpiUid = scopeMode === "person" && pid ? pid : uid;
 
       const todayKpiRes = await supabase
@@ -310,8 +272,8 @@ export default function AdminHubPage() {
 
       // -------------------------
       // Meetings (simplified schema)
-      // Period totals include discarded meetings (history stays)
-      // Scope=person uses attended_by_id (taker-owned outcomes)
+      // Period totals include discarded meetings
+      // Scope=person uses attended_by_id
       // -------------------------
       let mtgQ = supabase
         .from("meetings")
@@ -330,17 +292,12 @@ export default function AdminHubPage() {
         return Number.isFinite(t) && t <= nowMs;
       });
 
-      const occurredCount = occurred.length;
-      const showsCount = occurred.filter((m: any) => m.showed_up === true).length;
-      const movedCount = occurred.filter((m: any) => m.moved_to_ss2 === true).length;
-
-      setMeetingsOccurred(occurredCount);
-      setShows(showsCount);
-      setMoved(movedCount);
+      setMeetingsOccurred(occurred.length);
+      setShows(occurred.filter((m: any) => m.showed_up === true).length);
+      setMoved(occurred.filter((m: any) => m.moved_to_ss2 === true).length);
 
       // -------------------------
       // Today meetings (hide discarded)
-      // Scope=person uses attended_by_id
       // -------------------------
       let todayQ = supabase
         .from("meetings")
@@ -384,182 +341,184 @@ export default function AdminHubPage() {
 
   const showRate = pctRatio(shows, meetingsOccurred);
   const moveRate = pctRatio(moved, shows);
-  const kpiTone: Tone = todaySubmitted ? "green" : "amber";
 
-  if (loading) return <div className="p-6 text-black">Loading…</div>;
+  if (loading) return <div className="p-6 text-white">Loading…</div>;
 
   return (
-    return (
-  <AppShell
-    title="Admin Overview"
-    subtitle={`Scope: ${scopeLabel} • Period (${rangeMode}): ${rangeLabel} • Today: ${todayISO}`}
-    maxWidth="max-w-md"
-    right={
-      <>
-        <NeonButton variant="secondary" onClick={() => router.push("/hub")}>
-          Hub
-        </NeonButton>
-        <NeonButton variant="secondary" onClick={load}>
-          Refresh
-        </NeonButton>
-      </>
-    }
-  >
-    {/* meta line */}
-    <div className="mb-4 text-[11px] text-white/55">
-      Logged in as: <span className="text-white/80 font-medium">{myRole || "admin"}</span>
-      {isAdmin ? " (admin)" : ""} • Period totals include discarded meetings. Today totals hide discarded.
-      {scopeMode === "person" ? " Person scope attributes outcomes by attended_by_id." : ""}
-    </div>
-
-    {/* RANGE TOGGLE */}
-    <GlassCard className="mb-3" glow>
-      <div className="flex gap-2">
-        <NeonButton
-          variant={rangeMode === "weekly" ? "primary" : "secondary"}
-          className="flex-1"
-          onClick={() => setRangeMode("weekly")}
-          type="button"
-        >
-          Weekly
-        </NeonButton>
-        <NeonButton
-          variant={rangeMode === "monthly" ? "primary" : "secondary"}
-          className="flex-1"
-          onClick={() => setRangeMode("monthly")}
-          type="button"
-        >
-          Monthly
-        </NeonButton>
-      </div>
-    </GlassCard>
-
-    {/* SCOPE TOGGLE */}
-    <GlassCard className="mb-3" glow>
-      <div className="flex gap-2">
-        <NeonButton
-          variant={scopeMode === "team" ? "primary" : "secondary"}
-          className="flex-1"
-          onClick={() => setScopeMode("team")}
-          type="button"
-        >
-          Team
-        </NeonButton>
-        <NeonButton
-          variant={scopeMode === "person" ? "primary" : "secondary"}
-          className="flex-1"
-          onClick={() => setScopeMode("person")}
-          type="button"
-        >
-          Person
-        </NeonButton>
+    <AppShell
+      title="Admin Overview"
+      subtitle={`Scope: ${scopeLabel} • Period (${rangeMode}): ${rangeLabel} • Today: ${todayISO}`}
+      maxWidth="max-w-md"
+      right={
+        <>
+          <NeonButton variant="secondary" onClick={() => router.push("/hub")}>
+            Hub
+          </NeonButton>
+          <NeonButton variant="secondary" onClick={load}>
+            Refresh
+          </NeonButton>
+        </>
+      }
+    >
+      <div className="mb-4 text-[11px] text-white/55">
+        Logged in as: <span className="text-white/80 font-medium">{myRole || "admin"}</span>
+        {isAdmin ? " (admin)" : ""} • Period totals include discarded meetings. Today totals hide discarded.
+        {scopeMode === "person" ? " Person scope attributes outcomes by attended_by_id." : ""}
       </div>
 
-      {scopeMode === "person" ? (
-        <div className="mt-3">
-          <select
-            className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white outline-none"
-            value={effectivePersonId}
-            onChange={(e) => setPersonId(e.target.value)}
+      {/* RANGE TOGGLE */}
+      <GlassCard className="mb-3" glow>
+        <div className="flex gap-2">
+          <NeonButton
+            type="button"
+            className="flex-1"
+            variant={rangeMode === "weekly" ? "primary" : "secondary"}
+            onClick={() => setRangeMode("weekly")}
           >
-            {people.map((p) => (
-              <option key={p.id} value={p.id} className="text-black">
-                {p.full_name ?? p.id}
-              </option>
-            ))}
-          </select>
-          <div className="mt-2 text-[11px] text-white/55">
-            Person scope uses <b>meetings.attended_by_id</b> for shows/moved.
+            Weekly
+          </NeonButton>
+          <NeonButton
+            type="button"
+            className="flex-1"
+            variant={rangeMode === "monthly" ? "primary" : "secondary"}
+            onClick={() => setRangeMode("monthly")}
+          >
+            Monthly
+          </NeonButton>
+        </div>
+      </GlassCard>
+
+      {/* SCOPE TOGGLE */}
+      <GlassCard className="mb-3" glow>
+        <div className="flex gap-2">
+          <NeonButton
+            type="button"
+            className="flex-1"
+            variant={scopeMode === "team" ? "primary" : "secondary"}
+            onClick={() => setScopeMode("team")}
+          >
+            Team
+          </NeonButton>
+          <NeonButton
+            type="button"
+            className="flex-1"
+            variant={scopeMode === "person" ? "primary" : "secondary"}
+            onClick={() => setScopeMode("person")}
+          >
+            Person
+          </NeonButton>
+        </div>
+
+        {scopeMode === "person" ? (
+          <div className="mt-3">
+            <select
+              className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white outline-none"
+              value={effectivePersonId}
+              onChange={(e) => setPersonId(e.target.value)}
+            >
+              {people.map((p) => (
+                <option key={p.id} value={p.id} className="text-black">
+                  {p.full_name ?? p.id}
+                </option>
+              ))}
+            </select>
+
+            <div className="mt-2 text-[11px] text-white/55">
+              Person scope uses <b>meetings.attended_by_id</b> for shows/moved.
+            </div>
           </div>
-        </div>
-      ) : null}
-    </GlassCard>
-
-    {/* CARDS */}
-    <div className="grid grid-cols-2 gap-3 mb-3">
-      <GlassCard glow>
-        <div className="flex items-center justify-between">
-          <div className="text-xs text-white/60 font-semibold">Today KPI</div>
-          <NeonBadge tone={todaySubmitted ? "green" : "amber"}>
-            {todaySubmitted ? "Submitted" : "Not submitted"}
-          </NeonBadge>
-        </div>
-        <div className="mt-2 text-3xl font-semibold">{todaySubmitted ? "✅" : "—"}</div>
-        <div className="mt-3">
-          <NeonButton variant="secondary" onClick={() => router.push("/daily-kpis")} className="w-full">
-            Open Daily KPIs
-          </NeonButton>
-        </div>
+        ) : null}
       </GlassCard>
 
-      <GlassCard glow>
-        <div className="text-xs text-white/60 font-semibold">Meetings today</div>
-        <div className="mt-2 text-3xl font-semibold">{n(todayMeetings)}</div>
-        <div className="mt-1 text-xs text-white/55">Shows today: {n(todayShows)}</div>
-        <div className="mt-3">
-          <NeonButton variant="secondary" onClick={() => router.push("/meetings")} className="w-full">
-            Open Meetings
-          </NeonButton>
-        </div>
-      </GlassCard>
-    </div>
+      {/* TOP CARDS */}
+      <div className="grid grid-cols-2 gap-3 mb-3">
+        <GlassCard glow>
+          <div className="flex items-center justify-between">
+            <div className="text-xs text-white/60 font-semibold">Today KPI</div>
+            <NeonBadge tone={todaySubmitted ? "green" : "amber"}>
+              {todaySubmitted ? "Submitted" : "Not submitted"}
+            </NeonBadge>
+          </div>
+          <div className="mt-2 text-3xl font-semibold text-white">{todaySubmitted ? "✅" : "—"}</div>
+          <div className="mt-3">
+            <NeonButton variant="secondary" onClick={() => router.push("/daily-kpis")} className="w-full">
+              Open Daily KPIs
+            </NeonButton>
+          </div>
+        </GlassCard>
 
-    <div className="grid grid-cols-2 gap-3 mb-3">
-      <GlassCard>
-        <div className="text-xs text-white/60 font-semibold">Booked (KPI)</div>
-        <div className="mt-2 text-3xl font-semibold">{n(bookedKpi)}</div>
-        <div className="mt-1 text-xs text-white/55">Period: {rangeLabel}</div>
-      </GlassCard>
-
-      <GlassCard>
-        <div className="text-xs text-white/60 font-semibold">Meetings occurred</div>
-        <div className="mt-2 text-3xl font-semibold">{n(meetingsOccurred)}</div>
-        <div className="mt-1 text-xs text-white/55">Show rate: {showRate}</div>
-      </GlassCard>
-    </div>
-
-    <div className="grid grid-cols-2 gap-3 mb-4">
-      <GlassCard>
-        <div className="text-xs text-white/60 font-semibold">Shows</div>
-        <div className="mt-2 text-3xl font-semibold">{n(shows)}</div>
-        <div className="mt-1 text-xs text-white/55">
-          Moved: {n(moved)} • Move rate: {moveRate}
-        </div>
-      </GlassCard>
-
-      <GlassCard>
-        <div className="text-xs text-white/60 font-semibold">Moved to SS2</div>
-        <div className="mt-2 text-3xl font-semibold">{n(moved)}</div>
-        <div className="mt-1 text-xs text-white/55">
-          From shows: {n(shows)} • {moveRate}
-        </div>
-      </GlassCard>
-    </div>
-
-    {/* ADMIN TOOLS */}
-    <GlassCard glow>
-      <div className="text-sm font-semibold text-white">Admin tools</div>
-
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        <NeonButton variant="secondary" onClick={() => router.push("/meetings")} className="w-full">
-          Meetings
-        </NeonButton>
-        <NeonButton variant="secondary" onClick={() => router.push("/daily-kpis")} className="w-full">
-          Daily KPIs
-        </NeonButton>
-        <NeonButton variant="secondary" onClick={() => router.push("/admin/kpi-templates")} className="w-full">
-          KPI Setup
-        </NeonButton>
-        <NeonButton variant="secondary" onClick={() => router.push("/admin/performance")} className="w-full">
-          Performance
-        </NeonButton>
+        <GlassCard glow>
+          <div className="text-xs text-white/60 font-semibold">Meetings today</div>
+          <div className="mt-2 text-3xl font-semibold text-white">{n(todayMeetings)}</div>
+          <div className="mt-1 text-xs text-white/55">Shows today: {n(todayShows)}</div>
+          <div className="mt-3">
+            <NeonButton variant="secondary" onClick={() => router.push("/meetings")} className="w-full">
+              Open Meetings
+            </NeonButton>
+          </div>
+        </GlassCard>
       </div>
-    </GlassCard>
 
-    {msg ? (
-      <GlassCard className="mt-4">
-        <div className="text-sm text-white/80">{msg}</div>
+      <div className="grid grid-cols-2 gap-3 mb-3">
+        <GlassCard>
+          <div className="text-xs text-white/60 font-semibold">Booked (KPI)</div>
+          <div className="mt-2 text-3xl font-semibold text-white">{n(bookedKpi)}</div>
+          <div className="mt-1 text-xs text-white/55">Period: {rangeLabel}</div>
+        </GlassCard>
+
+        <GlassCard>
+          <div className="text-xs text-white/60 font-semibold">Meetings occurred</div>
+          <div className="mt-2 text-3xl font-semibold text-white">{n(meetingsOccurred)}</div>
+          <div className="mt-1 text-xs text-white/55">Show rate: {showRate}</div>
+        </GlassCard>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 mb-4">
+        <GlassCard>
+          <div className="text-xs text-white/60 font-semibold">Shows</div>
+          <div className="mt-2 text-3xl font-semibold text-white">{n(shows)}</div>
+          <div className="mt-1 text-xs text-white/55">
+            Moved: {n(moved)} • Move rate: {moveRate}
+          </div>
+        </GlassCard>
+
+        <GlassCard>
+          <div className="text-xs text-white/60 font-semibold">Moved to SS2</div>
+          <div className="mt-2 text-3xl font-semibold text-white">{n(moved)}</div>
+          <div className="mt-1 text-xs text-white/55">
+            From shows: {n(shows)} • {moveRate}
+          </div>
+        </GlassCard>
+      </div>
+
+      {/* ADMIN TOOLS */}
+      <GlassCard glow>
+        <div className="text-sm font-semibold text-white">Admin tools</div>
+
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <NeonButton variant="secondary" onClick={() => router.push("/meetings")} className="w-full">
+            Meetings
+          </NeonButton>
+
+          <NeonButton variant="secondary" onClick={() => router.push("/daily-kpis")} className="w-full">
+            Daily KPIs
+          </NeonButton>
+
+          <NeonButton variant="secondary" onClick={() => router.push("/admin/kpi-templates")} className="w-full">
+            KPI Setup
+          </NeonButton>
+
+          <NeonButton variant="secondary" onClick={() => router.push("/admin/performance")} className="w-full">
+            Performance
+          </NeonButton>
+        </div>
       </GlassCard>
-    ) : null}
-  </AppShell>
-);
+
+      {msg ? (
+        <GlassCard className="mt-4">
+          <div className="text-sm text-white/80">{msg}</div>
+        </GlassCard>
+      ) : null}
+    </AppShell>
+  );
+}
